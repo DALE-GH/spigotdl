@@ -17,8 +17,6 @@ spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
 
 ## Features
 
-## Features
-
 - **Simple plugin downloads**  
   Download Spigot plugins using either a resource ID or full resource URL. Resource IDs are extracted automatically from supported URLs.
 

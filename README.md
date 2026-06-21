@@ -77,12 +77,12 @@ sudo apt install -y python3
 ## Install
 
 ```bash
-sudo install -m 0755 spigotdl /usr/local/bin/spigotdl
-sudo install -m 0644 example.spigotdl.conf /etc/spigotdl.conf
-```
-```bash
 git clone https://github.com/DALE-GH/spigotdl
 cd ./spigotdl
+```
+```bash
+sudo install -m 0755 spigotdl /usr/local/bin/spigotdl
+sudo install -m 0644 example.spigotdl.conf /etc/spigotdl.conf
 ```
 
 Verify:

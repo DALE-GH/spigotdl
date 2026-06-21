@@ -1,8 +1,10 @@
 # spigotdl                
- _____ _____     ____  __    
+```
+_____ _____     ____  __    
 │   __│  _  │___│    ╲│  │   
 │__   │   __│___│  │  │  │__ 
 │_____│__│      │____╱│_____│ v1.3.0
+```
                              
 I got tired of manually managing plugins for my linux-hosted minecraft network, so I made
 `spigotdl` - A terminal tool for searching, downloading, tracking, and updating Minecraft server plugins from multiple plugin repositories.

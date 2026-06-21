@@ -89,12 +89,6 @@ List detected servers:
 spigotdl --list
 ```
 
-Disable color:
-
-```bash
-spigotdl --no-color server1 19254
-```
-
 Skip external-download confirmation prompts:
 
 ```bash

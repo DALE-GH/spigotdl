@@ -30,6 +30,10 @@ If `/etc/mc/<server>.conf` contains `SERVER_DIR=/some/path`, `spigotdl` uses tha
 
 ## Requirements
 
+- 5 minutes
+- A working Linux server
+- Minnecraft server(s) running on bare-metal or of which the files can be accessed directly via CLI
+
 Install dependencies:
 
 ```bash

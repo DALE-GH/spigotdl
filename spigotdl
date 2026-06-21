@@ -2,7 +2,7 @@
 import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-VERSION = "1.3.2"
+VERSION = "1.3.4"
 REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
 DEFAULTS = {
     "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
@@ -12,7 +12,7 @@ DEFAULTS = {
     "SPDL_EXCLUDE_REGEX": r"(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$|^tmp$|^temp$)",
     "SPDL_REGISTRY_DIR": ".spigotdl", "SPDL_REGISTRY_FILE": "registry.tsv",
     "SPDL_BACKUP_EXISTING": "true", "SPDL_VALIDATE_JAR": "true", "SPDL_AUTO_CHOWN": "true",
-    "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "25",
+    "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "25", "SPDL_SEARCH_PAGE_SIZE": "10",
     "SPDL_USER_AGENT": f"sp-dl/{VERSION} (+https://github.com/yourname/sp-dl)",
     "SPDL_SPIGET_API": "https://api.spiget.org/v2", "SPDL_MODRINTH_API": "https://api.modrinth.com/v2", "SPDL_HANGAR_API": "https://hangar.papermc.io/api/v1",
     "SPDL_RESTART_CMD_TEMPLATE": os.environ.get("SPIGOTDL_RESTART_CMD_TEMPLATE", ""),
@@ -83,8 +83,23 @@ def site(provider, s):
     return f"{c}{s}{Col.reset}"
 def now(): return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
+def clear_screen():
+    # Keep non-interactive output readable, but clear real terminal menus.
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="")
+
 def brand():
-    art = "\n".join(['               =()=', "           ,/'\\_||_", '           ( (___  `.', "           `\\./  `=='", '                   |||', '                  |||', '     _____  _____  ||   ____   __', '    |   __||  _  | ___ |    \\ |  |', '    |__   ||   __||___||  |  ||  |__', '    |_____||__|        |____/ |_____| v{VERSION}']).replace("{VERSION}", VERSION)
+    # Keep the banner version dynamic. Do not hardcode a version into the ASCII art.
+    art = fr"""               =()=
+           ,/'\_||_
+           ( (___  `.
+           `\./  `=='
+                   |||
+                  |||
+     _____  _____  ||   ____   __
+    |   __||  _  | ___ |    \ |  |
+    |__   ||   __||___||  |  ||  |__
+    |_____||__|        |____/ |_____| v{VERSION}"""
     print(f"{Col.yellow}{art}{Col.reset}")
     print(f"{tag()} sp-dl v{VERSION}\n")
 
@@ -357,16 +372,30 @@ def search_all(q, sources, limit, sort, api="", mc="", rel=""):
         return (match, -int(getattr(r,"downloads",0) or 0), provider_order, str(r.name).lower())
     return sorted(out, key=rank)
 
-def print_results(rs, page=1, page_size=None):
+def search_page_size():
+    try:
+        return max(1, int(CFG.get("SPDL_SEARCH_PAGE_SIZE", "10")))
+    except Exception:
+        return 10
+
+def print_results(rs, page=1, page_size=None, title="Search Results", context_lines=None, footer=""):
     if not rs:
         print(f"{Col.yellow}No results found.{Col.reset}")
         return
-    page_size = page_size or len(rs)
+
+    page_size = page_size or search_page_size()
     total=len(rs)
     start=(page-1)*page_size
     end=min(start+page_size,total)
-    width=max(2,len(str(total)))
-    print(f"\n{tag()} Search Results {Col.dim}({start+1}-{end} of {total}){Col.reset}")
+    width=max(2,len(str(end)))
+
+    print(f"\n{tag()} {title} {Col.dim}({start+1}-{end} of {total}){Col.reset}")
+
+    if context_lines:
+        for line in context_lines:
+            print(line)
+        print()
+
     for i,r in enumerate(rs[start:end],start+1):
         print(f"{Col.bold}{i:>{width}}){Col.reset} {site(r.provider,'['+r.provider.upper()+']')} {Col.bold}{r.name}{Col.reset}")
         print(f"     ID        : {r.ref()}")
@@ -376,22 +405,42 @@ def print_results(rs, page=1, page_size=None):
         if r.api: print(f"     API/Loader: {r.api}")
         if r.versions: print(f"     Versions  : {r.versions}")
         if r.rel: print(f"     Release   : {r.rel}")
+        print()
 
-def prompt_result_choice(prompt, result_count, allow_more=False):
-    suffix=f"[1-{result_count} / s=skip-next / q=quit-scan"
-    if allow_more: suffix += " / m=more"
-    suffix += "]: "
+    if footer:
+        print(f"{Col.dim}{footer}{Col.reset}")
+
+def prompt_result_choice(prompt, result_count, allow_more=False, visible_count=None, context=""):
+    visible_count = visible_count or min(search_page_size(), result_count)
+    visible_count = min(max(0, visible_count), result_count)
+
+    parts = []
+    if visible_count:
+        parts.append(f"1-{visible_count}")
+    parts.append("s=skip/next")
+    parts.append("q=quit/back")
+    if allow_more:
+        parts.append("m=more")
+    suffix="[" + " / ".join(parts) + "]: "
+
     while True:
+        if context:
+            print(f"{Col.dim}{context}{Col.reset}")
         c=input(prompt + " " + suffix).strip().lower()
+
         if c in ("", "s", "skip", "n", "next"):
             return "skip"
         if c in ("q", "quit", "exit", "b", "back"):
             return "quit"
-        if allow_more and c in ("m", "more"):
+        if allow_more and c in ("m", "more", "+"):
             return "more"
-        if c.isdigit() and 1 <= int(c) <= result_count:
+        if c.isdigit() and 1 <= int(c) <= visible_count:
             return int(c) - 1
-        warn(f"Invalid choice. Enter 1-{result_count}, s to skip, q to quit" + (", or m for more." if allow_more else "."))
+
+        if visible_count:
+            warn(f"Invalid choice. Enter 1-{visible_count}, s/next to skip, q/back to quit" + (", or m for more." if allow_more else "."))
+        else:
+            warn("Invalid choice. Enter s/next to skip or q/back to quit" + (", or m for more." if allow_more else "."))
 
 def update_server(s,dry=False):
     ensure_server(s); migrate_reg(s); rows=read_reg(s); checked=outdated=updated=failed=0
@@ -415,46 +464,113 @@ def guess_name(jar):
     n=Path(jar).stem; n=re.sub(r"[-_. ]+v?\d[\w.+-]*$","",n); return re.sub(r"[-_. ]+(bukkit|spigot|paper|velocity|waterfall|fabric|forge)$","",n,flags=re.I) or Path(jar).stem
 
 def scan_server(s,sources,yes=False,dry=False):
-    ensure_server(s); migrate_reg(s); tracked={r.get("filename") for r in read_reg(s)}; jars=sorted(list(s["plugin_dir"].glob("*.jar"))+list(s["plugin_dir"].glob("*.JAR")))
-    print(f"\n{tag()} Scanning {s['name']}\n  Plugin dir: {s['plugin_dir']}")
-    print(f"  Navigation: {Col.dim}s/next=skip plugin, q/back=quit scan, m=show more results{Col.reset}")
+    ensure_server(s); migrate_reg(s)
+    tracked={r.get("filename") for r in read_reg(s)}
+    jars=sorted(list(s["plugin_dir"].glob("*.jar"))+list(s["plugin_dir"].glob("*.JAR")))
+    total_jars=len(jars)
+    page_step=search_page_size()
     added=skipped=0
-    for jar in jars:
+
+    if yes:
+        print(f"\n{tag()} Scanning {s['name']}\n  Plugin dir: {s['plugin_dir']}")
+
+    for idx,jar in enumerate(jars,1):
         if jar.name in tracked:
-            print(f"{Col.dim}tracked:{Col.reset} {jar.name}"); continue
-        q=guess_name(jar); print(f"\n{Col.cyan}{Col.bold}Untracked:{Col.reset} {jar.name} {Col.dim}(query: {q}){Col.reset}")
-        limit=max(10, int(CFG.get("SPDL_SEARCH_LIMIT", "25")))
+            if yes:
+                print(f"{Col.dim}tracked:{Col.reset} {jar.name}")
+            continue
+
+        q=guess_name(jar)
+        limit=max(page_step, int(CFG.get("SPDL_SEARCH_LIMIT", "25")))
         rs=search_all(q,sources,limit,"relevance")
-        if not rs: skipped+=1; warn(f"No match for {jar.name}"); continue
+
+        if not rs:
+            skipped+=1
+            if yes:
+                warn(f"No match for {jar.name}")
+            else:
+                clear_screen(); brand()
+                print(f"{tag()} Tracking Plugin {idx}/{total_jars}")
+                print(f"  Server    : {s['name']}")
+                print(f"  Plugin dir: {s['plugin_dir']}")
+                print(f"  Plugin    : {jar.name}")
+                print(f"  Query     : {q}")
+                print(f"\n{Col.yellow}No results found.{Col.reset}")
+                c=input("Press Enter to skip to next plugin, or q/back to quit scan: ").strip().lower()
+                if c in ("q","quit","exit","b","back"):
+                    print(f"\n{tag()} Scan stopped by user. added={added} skipped={skipped} total_jars={total_jars}")
+                    return
+            continue
+
         if yes:
             norm=lambda x: re.sub(r"[^a-z0-9]+","",x.lower())
             sel=next((r for r in rs if norm(r.name)==norm(q)),None)
-            if not sel: skipped+=1; warn(f"No exact match for {jar.name}"); continue
+            if not sel:
+                skipped+=1; warn(f"No exact match for {jar.name}"); continue
         else:
+            visible=min(page_step,len(rs))
+            sel=None
             while True:
-                print_results(rs)
-                choice=prompt_result_choice(f"Track which result for {jar.name}?", len(rs), allow_more=True)
+                clear_screen(); brand()
+                context_lines=[
+                    f"{Col.bold}Server    :{Col.reset} {s['name']}",
+                    f"{Col.bold}Plugin dir:{Col.reset} {s['plugin_dir']}",
+                    f"{Col.bold}Plugin    :{Col.reset} {jar.name}",
+                    f"{Col.bold}Query     :{Col.reset} {q}",
+                ]
+                footer=(
+                    f"Selecting plugin {idx}/{total_jars}: {jar.name} | "
+                    f"Showing 1-{min(visible,len(rs))} of {len(rs)} results | "
+                    f"s/next=skip plugin, q/back=quit scan, m=show more"
+                )
+                print_results(rs, page=1, page_size=visible, title="Track Plugin Search", context_lines=context_lines, footer=footer)
+                choice=prompt_result_choice(
+                    f"Track which result for {jar.name}?",
+                    len(rs),
+                    allow_more=True,
+                    visible_count=visible,
+                    context=f"[selecting plugin {idx}/{total_jars}]"
+                )
                 if choice == "skip":
                     skipped+=1; sel=None; break
                 if choice == "quit":
-                    print(f"\n{tag()} Scan stopped by user. added={added} skipped={skipped} total_jars={len(jars)}")
+                    print(f"\n{tag()} Scan stopped by user. added={added} skipped={skipped} total_jars={total_jars}")
                     return
                 if choice == "more":
-                    limit += max(10, int(CFG.get("SPDL_SEARCH_LIMIT", "25")))
-                    rs=search_all(q,sources,limit,"relevance")
+                    if visible < len(rs):
+                        visible=min(visible+page_step, len(rs))
+                    else:
+                        limit += page_step
+                        new_rs=search_all(q,sources,limit,"relevance")
+                        if len(new_rs) > len(rs):
+                            rs=new_rs; visible=min(visible+page_step, len(rs))
+                        else:
+                            warn("No additional results found.")
+                            input("Press Enter to continue...")
                     continue
                 sel=rs[choice]
                 break
             if not sel:
                 continue
-        if dry: print(f"{Col.yellow}Dry run:{Col.reset} would track {jar.name} as {sel.ref()}")
+
+        if dry:
+            print(f"{Col.yellow}Dry run:{Col.reset} would track {jar.name} as {sel.ref()}")
+            if not yes:
+                input("Press Enter for next plugin...")
         else:
             try: v=PROVIDERS[sel.provider].latest(sel.project_id)
             except Exception: v=Version(sel.provider,sel.project_id,"",sel.name,sel.rel,sel.api,sel.versions,jar.name,"")
             upsert_reg(s,{"provider":sel.provider,"project_id":sel.project_id,"version_id":v.version_id,"filename":jar.name,"project_name":sel.name,"release_type":v.release_type,"loaders":v.loaders,"game_versions":v.versions,"installed_at":now(),"source":"scan"})
-            print(f"{Col.green}Tracked:{Col.reset} {jar.name} -> {sel.ref()}")
+            if yes:
+                print(f"{Col.green}Tracked:{Col.reset} {jar.name} -> {sel.ref()}")
+            else:
+                print(f"\n{Col.green}Tracked:{Col.reset} {jar.name} -> {sel.ref()}")
+                input("Press Enter for next plugin...")
         added+=1
-    print(f"\n{tag()} Scan summary: added={added} skipped={skipped} total_jars={len(jars)}")
+
+    if not yes:
+        clear_screen(); brand()
+    print(f"\n{tag()} Scan summary: added={added} skipped={skipped} total_jars={total_jars}")
 
 def overview(servers,check=True,details=False):
     print(f"\n{tag()} Server Overview\n")
@@ -510,7 +626,19 @@ def menu():
         c=input("Select: ").strip()
         if c=="0": return
         if c=="1":
-            q=input("Search query: ").strip(); src=input("Source [all/spigot/modrinth/hangar] (all): ").strip() or "all"; rs=search_all(q, list(PROVIDERS) if src=="all" else [src], int(CFG["SPDL_SEARCH_LIMIT"]), "relevance"); print_results(rs)
+            q=input("Search query: ").strip(); src=input("Source [all/spigot/modrinth/hangar] (all): ").strip() or "all"
+            limit=max(search_page_size(), int(CFG["SPDL_SEARCH_LIMIT"])); rs=search_all(q, list(PROVIDERS) if src=="all" else [src], limit, "relevance")
+            visible=min(search_page_size(), len(rs)) if rs else search_page_size()
+            while True:
+                clear_screen(); brand(); print_results(rs, page_size=visible, title=f"Search: {q}", footer=f"Showing 1-{min(visible,len(rs)) if rs else 0} of {len(rs)} results | q/back=main menu, m=show more")
+                ch=input("Search menu [m=more / q=back]: ").strip().lower()
+                if ch in ("q","quit","b","back",""): break
+                if ch in ("m","more","+"):
+                    if visible < len(rs): visible=min(visible+search_page_size(), len(rs))
+                    else:
+                        limit += search_page_size(); new_rs=search_all(q, list(PROVIDERS) if src=="all" else [src], limit, "relevance")
+                        if len(new_rs)>len(rs): rs=new_rs; visible=min(visible+search_page_size(), len(rs))
+                        else: warn("No additional results found."); input("Press Enter to continue...")
         elif c=="2": install_ref(choose_server(), input("Resource ID / URL / provider ref: ").strip())
         elif c=="3": process_batch(input("Batch file: ").strip(), choose_server(), argparse.Namespace(api="",mc_version="",release="",dry_run=False))
         elif c=="4": scan_server(choose_server(), list(PROVIDERS))
@@ -551,17 +679,23 @@ def main(argv=None):
     if args.cmd=="menu": menu(); return
     if args.cmd=="list": [print(f"{s['name']}\t{s['server_dir']}\t{s['plugin_dir']}") for s in list_servers()]; return
     if args.cmd=="search":
-        brand(); src=list(PROVIDERS) if args.source=="all" else [args.source]; rs=search_all(" ".join(args.query),src,args.limit,args.sort,args.api,args.mc_version,args.release); print_results(rs)
-        if rs and (args.server or args.server_dir or args.plugin_dir):
+        brand(); src=list(PROVIDERS) if args.source=="all" else [args.source]; rs=search_all(" ".join(args.query),src,args.limit,args.sort,args.api,args.mc_version,args.release)
+        visible=min(search_page_size(), len(rs)) if rs else search_page_size()
+        while True:
+            clear_screen(); brand(); print_results(rs, page_size=visible, title="Search Results", footer=f"Showing 1-{min(visible,len(rs)) if rs else 0} of {len(rs)} results")
+            if not (rs and (args.server or args.server_dir or args.plugin_dir)):
+                if len(rs) > visible:
+                    ch=input("Search menu [m=more / q=quit]: ").strip().lower()
+                    if ch in ("m","more","+"): visible=min(visible+search_page_size(), len(rs)); continue
+                return
             if args.install:
-                c="1"
+                choice=0
             else:
-                choice=prompt_result_choice("Install which result?", len(rs), allow_more=False)
-                if choice in ("skip", "quit", "more"):
-                    return
-                c=str(choice+1)
-            if c.isdigit() and 1<=int(c)<=len(rs): install_ref(resolve_server(args.server,args.server_dir,args.plugin_dir),rs[int(c)-1].ref(),args.api,args.mc_version,args.release,"","search",args.dry_run)
-        return
+                choice=prompt_result_choice("Install which result?", len(rs), allow_more=(visible < len(rs)), visible_count=visible)
+                if choice == "more": visible=min(visible+search_page_size(), len(rs)); continue
+                if choice in ("skip", "quit"): return
+            install_ref(resolve_server(args.server,args.server_dir,args.plugin_dir),rs[choice].ref(),args.api,args.mc_version,args.release,"","search",args.dry_run)
+            return
     if args.cmd=="install":
         for s in targets(args):
             for ref in args.refs: install_ref(s,ref,args.api,args.mc_version,args.release,args.name,"manual",args.dry_run)

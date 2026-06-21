@@ -2,7 +2,7 @@
 import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
 DEFAULTS = {
     "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
@@ -12,7 +12,7 @@ DEFAULTS = {
     "SPDL_EXCLUDE_REGEX": r"(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$|^tmp$|^temp$)",
     "SPDL_REGISTRY_DIR": ".spigotdl", "SPDL_REGISTRY_FILE": "registry.tsv",
     "SPDL_BACKUP_EXISTING": "true", "SPDL_VALIDATE_JAR": "true", "SPDL_AUTO_CHOWN": "true",
-    "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "10",
+    "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "25",
     "SPDL_USER_AGENT": f"sp-dl/{VERSION} (+https://github.com/yourname/sp-dl)",
     "SPDL_SPIGET_API": "https://api.spiget.org/v2", "SPDL_MODRINTH_API": "https://api.modrinth.com/v2", "SPDL_HANGAR_API": "https://hangar.papermc.io/api/v1",
     "SPDL_RESTART_CMD_TEMPLATE": os.environ.get("SPIGOTDL_RESTART_CMD_TEMPLATE", ""),
@@ -84,15 +84,8 @@ def site(provider, s):
 def now(): return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
 def brand():
-    print(f"{Col.yellow}" + r'''
-               =()=
-           ,/'\_||_
-           ( (___  `.
-           `\./  `=='
-                   |||
-                  |||
-     SP-DL        ||
-'''.rstrip() + f"{Col.reset}")
+    art = "\n".join(['               =()=', "           ,/'\\_||_", '           ( (___  `.', "           `\\./  `=='", '                   |||', '                  |||', '     _____  _____  ||   ____   __', '    |   __||  _  | ___ |    \\ |  |', '    |__   ||   __||___||  |  ||  |__', '    |_____||__|        |____/ |_____| v{VERSION}']).replace("{VERSION}", VERSION)
+    print(f"{Col.yellow}{art}{Col.reset}")
     print(f"{tag()} sp-dl v{VERSION}\n")
 
 def http_json(url):
@@ -341,18 +334,41 @@ def install_version(s,v,source="manual",name="",dry=False):
 def install_ref(s, ref, api="", mc="", rel="", name="", source="manual", dry=False):
     p,pid=parse_ref(ref, CFG["SPDL_DEFAULT_SOURCE"]); install_version(s, PROVIDERS[p].latest(pid,api,mc,rel), source, name, dry)
 
+def _norm_rank_text(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
 def search_all(q, sources, limit, sort, api="", mc="", rel=""):
     out=[]
     for p in sources:
-        try: out += PROVIDERS[p].search(q,limit,sort,api,mc,rel)
-        except Exception as e: warn(f"{p} search failed: {e}")
-    return out
+        try:
+            out += PROVIDERS[p].search(q,limit,sort,api,mc,rel)
+        except Exception as e:
+            warn(f"{p} search failed: {e}")
+    qn=_norm_rank_text(q)
+    def rank(r):
+        rn=_norm_rank_text(r.name)
+        rd=_norm_rank_text(r.desc)
+        if rn == qn: match=0
+        elif rn.startswith(qn): match=1
+        elif qn and qn in rn: match=2
+        elif qn and qn in rd: match=3
+        else: match=4
+        provider_order={"spigot":0,"modrinth":1,"hangar":2}.get(r.provider,9)
+        return (match, -int(getattr(r,"downloads",0) or 0), provider_order, str(r.name).lower())
+    return sorted(out, key=rank)
 
-def print_results(rs):
-    if not rs: print(f"{Col.yellow}No results found.{Col.reset}"); return
-    print(f"\n{tag()} Search Results")
-    for i,r in enumerate(rs,1):
-        print(f"{Col.bold}{i:>2}){Col.reset} {site(r.provider,'['+r.provider.upper()+']')} {Col.bold}{r.name}{Col.reset}")
+def print_results(rs, page=1, page_size=None):
+    if not rs:
+        print(f"{Col.yellow}No results found.{Col.reset}")
+        return
+    page_size = page_size or len(rs)
+    total=len(rs)
+    start=(page-1)*page_size
+    end=min(start+page_size,total)
+    width=max(2,len(str(total)))
+    print(f"\n{tag()} Search Results {Col.dim}({start+1}-{end} of {total}){Col.reset}")
+    for i,r in enumerate(rs[start:end],start+1):
+        print(f"{Col.bold}{i:>{width}}){Col.reset} {site(r.provider,'['+r.provider.upper()+']')} {Col.bold}{r.name}{Col.reset}")
         print(f"     ID        : {r.ref()}")
         if r.desc: print(f"     Summary   : {r.desc}")
         print(f"     Downloads : {r.downloads}")
@@ -360,6 +376,22 @@ def print_results(rs):
         if r.api: print(f"     API/Loader: {r.api}")
         if r.versions: print(f"     Versions  : {r.versions}")
         if r.rel: print(f"     Release   : {r.rel}")
+
+def prompt_result_choice(prompt, result_count, allow_more=False):
+    suffix=f"[1-{result_count} / s=skip-next / q=quit-scan"
+    if allow_more: suffix += " / m=more"
+    suffix += "]: "
+    while True:
+        c=input(prompt + " " + suffix).strip().lower()
+        if c in ("", "s", "skip", "n", "next"):
+            return "skip"
+        if c in ("q", "quit", "exit", "b", "back"):
+            return "quit"
+        if allow_more and c in ("m", "more"):
+            return "more"
+        if c.isdigit() and 1 <= int(c) <= result_count:
+            return int(c) - 1
+        warn(f"Invalid choice. Enter 1-{result_count}, s to skip, q to quit" + (", or m for more." if allow_more else "."))
 
 def update_server(s,dry=False):
     ensure_server(s); migrate_reg(s); rows=read_reg(s); checked=outdated=updated=failed=0
@@ -385,20 +417,36 @@ def guess_name(jar):
 def scan_server(s,sources,yes=False,dry=False):
     ensure_server(s); migrate_reg(s); tracked={r.get("filename") for r in read_reg(s)}; jars=sorted(list(s["plugin_dir"].glob("*.jar"))+list(s["plugin_dir"].glob("*.JAR")))
     print(f"\n{tag()} Scanning {s['name']}\n  Plugin dir: {s['plugin_dir']}")
+    print(f"  Navigation: {Col.dim}s/next=skip plugin, q/back=quit scan, m=show more results{Col.reset}")
     added=skipped=0
     for jar in jars:
-        if jar.name in tracked: print(f"{Col.dim}tracked:{Col.reset} {jar.name}"); continue
+        if jar.name in tracked:
+            print(f"{Col.dim}tracked:{Col.reset} {jar.name}"); continue
         q=guess_name(jar); print(f"\n{Col.cyan}{Col.bold}Untracked:{Col.reset} {jar.name} {Col.dim}(query: {q}){Col.reset}")
-        rs=search_all(q,sources,5,"relevance")
+        limit=max(10, int(CFG.get("SPDL_SEARCH_LIMIT", "25")))
+        rs=search_all(q,sources,limit,"relevance")
         if not rs: skipped+=1; warn(f"No match for {jar.name}"); continue
         if yes:
             norm=lambda x: re.sub(r"[^a-z0-9]+","",x.lower())
             sel=next((r for r in rs if norm(r.name)==norm(q)),None)
             if not sel: skipped+=1; warn(f"No exact match for {jar.name}"); continue
         else:
-            print_results(rs); c=input(f"Track which result for {jar.name}? [number/s]: ").strip()
-            if not c or c.lower().startswith("s") or not c.isdigit() or not (1<=int(c)<=len(rs)): skipped+=1; continue
-            sel=rs[int(c)-1]
+            while True:
+                print_results(rs)
+                choice=prompt_result_choice(f"Track which result for {jar.name}?", len(rs), allow_more=True)
+                if choice == "skip":
+                    skipped+=1; sel=None; break
+                if choice == "quit":
+                    print(f"\n{tag()} Scan stopped by user. added={added} skipped={skipped} total_jars={len(jars)}")
+                    return
+                if choice == "more":
+                    limit += max(10, int(CFG.get("SPDL_SEARCH_LIMIT", "25")))
+                    rs=search_all(q,sources,limit,"relevance")
+                    continue
+                sel=rs[choice]
+                break
+            if not sel:
+                continue
         if dry: print(f"{Col.yellow}Dry run:{Col.reset} would track {jar.name} as {sel.ref()}")
         else:
             try: v=PROVIDERS[sel.provider].latest(sel.project_id)
@@ -482,7 +530,7 @@ def build_parser():
     p.add_argument("--version", action="store_true"); p.add_argument("--no-color", action="store_true")
     sub=p.add_subparsers(dest="cmd")
     sub.add_parser("menu"); sub.add_parser("list")
-    s=sub.add_parser("search"); s.add_argument("query", nargs="+"); s.add_argument("--source", choices=["spigot","modrinth","hangar","all"], default="all"); s.add_argument("--api", default=""); s.add_argument("--mc-version","--version",dest="mc_version",default=""); s.add_argument("--release", choices=["release","beta","alpha","snapshot"], default=""); s.add_argument("--sort", choices=["relevance","downloads","stars","updated","newest"], default="relevance"); s.add_argument("--limit", type=int, default=10); s.add_argument("--server", default=""); s.add_argument("--server-dir", default=""); s.add_argument("--plugin-dir", default=""); s.add_argument("--install", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    s=sub.add_parser("search"); s.add_argument("query", nargs="+"); s.add_argument("--source", choices=["spigot","modrinth","hangar","all"], default="all"); s.add_argument("--api", default=""); s.add_argument("--mc-version","--version",dest="mc_version",default=""); s.add_argument("--release", choices=["release","beta","alpha","snapshot"], default=""); s.add_argument("--sort", choices=["relevance","downloads","stars","updated","newest"], default="relevance"); s.add_argument("--limit", type=int, default=25); s.add_argument("--server", default=""); s.add_argument("--server-dir", default=""); s.add_argument("--plugin-dir", default=""); s.add_argument("--install", action="store_true"); s.add_argument("--dry-run", action="store_true")
     i=sub.add_parser("install"); i.add_argument("refs", nargs="+"); i.add_argument("--server","-s",default=""); i.add_argument("--server-dir",default=""); i.add_argument("--plugin-dir",default=""); i.add_argument("--api",default=""); i.add_argument("--mc-version","--version",dest="mc_version",default=""); i.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); i.add_argument("--name","-n",default=""); i.add_argument("--dry-run",action="store_true")
     b=sub.add_parser("batch"); b.add_argument("file"); b.add_argument("--server","-s",default=""); b.add_argument("--server-dir",default=""); b.add_argument("--plugin-dir",default=""); b.add_argument("--api",default=""); b.add_argument("--mc-version","--version",dest="mc_version",default=""); b.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); b.add_argument("--dry-run",action="store_true")
     sc=sub.add_parser("scan"); sc.add_argument("--server","-s",default=""); sc.add_argument("--server-dir",default=""); sc.add_argument("--plugin-dir",default=""); sc.add_argument("--source",choices=["spigot","modrinth","hangar","all"],default="all"); sc.add_argument("--yes","-y",action="store_true"); sc.add_argument("--dry-run",action="store_true")
@@ -505,7 +553,13 @@ def main(argv=None):
     if args.cmd=="search":
         brand(); src=list(PROVIDERS) if args.source=="all" else [args.source]; rs=search_all(" ".join(args.query),src,args.limit,args.sort,args.api,args.mc_version,args.release); print_results(rs)
         if rs and (args.server or args.server_dir or args.plugin_dir):
-            c="1" if args.install else input("Install which result? [number/s]: ").strip()
+            if args.install:
+                c="1"
+            else:
+                choice=prompt_result_choice("Install which result?", len(rs), allow_more=False)
+                if choice in ("skip", "quit", "more"):
+                    return
+                c=str(choice+1)
             if c.isdigit() and 1<=int(c)<=len(rs): install_ref(resolve_server(args.server,args.server_dir,args.plugin_dir),rs[int(c)-1].ref(),args.api,args.mc_version,args.release,"","search",args.dry_run)
         return
     if args.cmd=="install":

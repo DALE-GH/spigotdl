@@ -9,7 +9,7 @@
      _____  _____  ||   ____   __
     |   __||  _  | ___ |    \ |  |
     |__   ||   __||___||  |  ||  |__
-    |_____||__|        |____/ |_____| v1.3.0
+    |_____||__|        |____/ |_____| 
 ```
                              
 I got tired of manually managing plugins for my linux-hosted minecraft network, so I made

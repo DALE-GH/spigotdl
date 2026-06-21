@@ -399,4 +399,3 @@ spigotdl search viaversion --source hangar
 - Premium or account-gated downloads are not supported.
 - Search filters vary by provider. Modrinth has the strongest structured filtering; Spigot and Hangar support fewer filters through public endpoints.
 - Automatic scan matching is best-effort.
-- Live-loading plugins with PlugMan is not safe for every plugin. Restarting the server is usually safer.

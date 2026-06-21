@@ -2,7 +2,7 @@
 import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
 DEFAULTS = {
     "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
@@ -13,6 +13,8 @@ DEFAULTS = {
     "SPDL_REGISTRY_DIR": ".spigotdl", "SPDL_REGISTRY_FILE": "registry.tsv",
     "SPDL_BACKUP_EXISTING": "true", "SPDL_VALIDATE_JAR": "true", "SPDL_AUTO_CHOWN": "true",
     "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "25", "SPDL_SEARCH_PAGE_SIZE": "10",
+    "SPDL_PLUGIN_ONLY": "true",
+    "SPDL_MODRINTH_PLUGIN_LOADERS": "bukkit,spigot,paper,purpur,folia,velocity,waterfall",
     "SPDL_USER_AGENT": f"sp-dl/{VERSION} (+https://github.com/yourname/sp-dl)",
     "SPDL_SPIGET_API": "https://api.spiget.org/v2", "SPDL_MODRINTH_API": "https://api.modrinth.com/v2", "SPDL_HANGAR_API": "https://hangar.papermc.io/api/v1",
     "SPDL_RESTART_CMD_TEMPLATE": os.environ.get("SPIGOTDL_RESTART_CMD_TEMPLATE", ""),
@@ -220,20 +222,35 @@ class Spigot:
 class Modrinth:
     name="modrinth"
     def base(self): return CFG["SPDL_MODRINTH_API"].rstrip("/")
-    def loader(self,api): return {"paper":"paper","spigot":"spigot","bukkit":"bukkit","purpur":"purpur","velocity":"velocity","waterfall":"waterfall"}.get(api.lower(), api.lower())
+    def loader(self,api): return {"paper":"paper","spigot":"spigot","bukkit":"bukkit","purpur":"purpur","folia":"folia","velocity":"velocity","waterfall":"waterfall"}.get(str(api).lower(), str(api).lower())
+    def plugin_loaders(self):
+        return [x.strip() for x in CFG.get("SPDL_MODRINTH_PLUGIN_LOADERS","bukkit,spigot,paper,purpur,folia,velocity,waterfall").split(",") if x.strip()]
     def search(self,q,limit,sort,api="",mc="",rel=""):
         idx={"downloads":"downloads","stars":"follows","updated":"updated","newest":"newest"}.get(sort,"relevance")
         facets=[["project_type:mod"]]
-        if api: facets.append([f"categories:{self.loader(api)}"])
+        if api:
+            facets.append([f"categories:{self.loader(api)}"])
+        elif truthy(CFG.get("SPDL_PLUGIN_ONLY","true")):
+            # Modrinth stores plugins under project_type=mod, so restrict default searches
+            # to server/plugin loaders to avoid Fabric/Forge/Quilt-only mods.
+            facets.append([f"categories:{x}" for x in self.plugin_loaders()])
         if mc: facets.append([f"versions:{mc}"])
         params=urllib.parse.urlencode({"query":q,"limit":limit,"index":idx,"facets":json.dumps(facets,separators=(",",":"))})
         data=http_json(f"{self.base()}/search?{params}"); out=[]
         for x in data.get("hits",[]) if isinstance(data,dict) else []:
-            out.append(Result("modrinth", x.get("project_id") or x.get("slug"), x.get("title"), x.get("description","")[:160], x.get("downloads",0), x.get("follows",0), ",".join((x.get("categories") or [])[:8]), ",".join((x.get("versions") or [])[-5:]), rel))
+            cats=x.get("categories") or []
+            if truthy(CFG.get("SPDL_PLUGIN_ONLY","true")) and not api:
+                allowed=set(self.plugin_loaders())
+                if not any(c in allowed for c in cats):
+                    continue
+            out.append(Result("modrinth", x.get("project_id") or x.get("slug"), x.get("title"), x.get("description","")[:160], x.get("downloads",0), x.get("follows",0), ",".join(cats[:8]), ",".join((x.get("versions") or [])[-5:]), rel))
         return out
     def versions(self,pid,api="",mc="",rel=""):
         params={}
-        if api: params["loaders"]=json.dumps([self.loader(api)],separators=(",",":"))
+        if api:
+            params["loaders"]=json.dumps([self.loader(api)],separators=(",",":"))
+        elif truthy(CFG.get("SPDL_PLUGIN_ONLY","true")):
+            params["loaders"]=json.dumps(self.plugin_loaders(),separators=(",",":"))
         if mc: params["game_versions"]=json.dumps([mc],separators=(",",":"))
         url=f"{self.base()}/project/{enc(pid)}/version" + ("?"+urllib.parse.urlencode(params) if params else "")
         vs=http_json(url); vs = vs if isinstance(vs,list) else []
@@ -602,8 +619,20 @@ def overview(servers,check=True,details=False):
                     else: print(f"  {Col.red}CHECK_FAILED{Col.reset} {r.get('project_name')} [{r.get('provider')}] {reason}")
 
 def process_batch(file, default_s, args):
+    path=Path(str(file).strip()).expanduser()
+    if not str(path):
+        warn("No batch file entered.")
+        return
+    if not path.exists() or not path.is_file():
+        warn(f"Batch file not found: {path}")
+        print("Batch install expects a text file, for example:")
+        print("  spigot:19254")
+        print("  modrinth:luckperms")
+        print("  hangar:ViaVersion/ViaVersion")
+        print("For a single plugin ID or URL, use menu option 2: Install by ID / URL / provider ref.")
+        return
     count=0
-    for no,raw in enumerate(Path(file).read_text(errors="replace").splitlines(),1):
+    for no,raw in enumerate(path.read_text(errors="replace").splitlines(),1):
         line=raw.split("#",1)[0].strip()
         if not line: continue
         parts=line.split()
@@ -640,7 +669,14 @@ def menu():
                         if len(new_rs)>len(rs): rs=new_rs; visible=min(visible+search_page_size(), len(rs))
                         else: warn("No additional results found."); input("Press Enter to continue...")
         elif c=="2": install_ref(choose_server(), input("Resource ID / URL / provider ref: ").strip())
-        elif c=="3": process_batch(input("Batch file: ").strip(), choose_server(), argparse.Namespace(api="",mc_version="",release="",dry_run=False))
+        elif c=="3":
+            print(f"{tag()} Batch Install")
+            print("Batch install expects a text file with one plugin per line.")
+            print("Example lines: spigot:19254  |  modrinth:luckperms")
+            batch_file=input("Batch file path [b=back]: ").strip()
+            if batch_file.lower() in ("b","back","q","quit",""):
+                continue
+            process_batch(batch_file, choose_server(), argparse.Namespace(api="",mc_version="",release="",dry_run=False))
         elif c=="4": scan_server(choose_server(), list(PROVIDERS))
         elif c=="5": update_server(choose_server())
         elif c=="6": overview(list_servers(), True, True)

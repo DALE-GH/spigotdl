@@ -17,14 +17,28 @@ spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
 
 ## Features
 
+## Features
 
-- **Simple plugin downloads** \ Download Spigot plugins using either a resource ID or full resource URL. Resource IDs are extracted automatically from supported URLs.
-- **Interactive and script-friendly usage** \ Use the interactive server picker for manual installs, or direct commands for scripts, automation, and repeatable workflows.
-- **Batch and multi-server installs** \ Install multiple plugins at once, including batch files that target one server or multiple servers.
-- **Safe file handling** \ Preserves the original uploaded .jar filename when available, validates downloads with unzip -t, and backs up existing plugin files before replacing them.
-- **Plugin tracking and updates** \ Maintains a local plugin registry, can scan existing plugin folders, and can update tracked plugins for one server, selected servers, or all detected servers.
-- **Flexible server layouts** \ Supports custom server roots, config directories, plugin folder names, and direct --server-dir or --plugin-dir paths for non-standard setups.
-- **Configurable behavior** \ Supports system-wide config, per-user config, environment-variable overrides, and optional post-install command suggestions.
+- **Simple plugin downloads**  
+  Download Spigot plugins using either a resource ID or full resource URL. Resource IDs are extracted automatically from supported URLs.
+
+- **Interactive and script-friendly usage**  
+  Use the interactive server picker for manual installs, or direct commands for scripts, automation, and repeatable workflows.
+
+- **Batch and multi-server installs**  
+  Install multiple plugins at once, including batch files that target one server or multiple servers.
+
+- **Safe file handling**  
+  Preserves the original uploaded `.jar` filename when available, validates downloads with `unzip -t`, and backs up existing plugin files before replacing them.
+
+- **Plugin tracking and updates**  
+  Maintains a local plugin registry, can scan existing plugin folders, and can update tracked plugins for one server, selected servers, or all detected servers.
+
+- **Flexible server layouts**  
+  Supports custom server roots, config directories, plugin folder names, and direct `--server-dir` or `--plugin-dir` paths for non-standard setups.
+
+- **Configurable behavior**  
+  Supports system-wide config, per-user config, environment-variable overrides, and optional post-install restart or PlugMan command suggestions.
 
 ## Requirements
 

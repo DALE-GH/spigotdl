@@ -68,8 +68,12 @@ sudo pacman -S --needed bash curl unzip python coreutils findutils file
 
 ## Install
 
-Clone the repository or download the files, then install the script:
+Clone the repository, then install the script:
 
+```bash
+git clone https://github.com/DALE-GH/spigotdl/
+cd ./spigotdl
+```
 ```bash
 sudo install -m 0755 spigotdl /usr/local/bin/spigotdl
 ```

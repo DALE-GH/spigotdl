@@ -1,13 +1,26 @@
-# spigotdl
-
+# spigotdl                
+```js
+               =()=                                                                          Spigot go brrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+           ,/'\_||_
+           ( (___  `.
+           `\./  `=='
+                   |||
+                  |||
+     _____  _____  ||   ____   __
+    |   __||  _  | ___ |    \ |  |
+    |__   ||   __||___||  |  ||  |__
+    |_____||__|        |____/ |_____| v1.3.0
+```
+                             
 I got tired of manually managing plugins for my linux-hosted minecraft network, so I made
-`spigotdl` - A small Bash CLI tool for downloading and updating plugin`.jar` files directly from the terminal.
+`spigotdl` - A terminal tool for searching, downloading, tracking, and updating Minecraft server plugins from multiple plugin repositories.
 
 It is intended for Linux-hosted Minecraft servers where the server files are accessible from the command line. It works with single-server and multi-server setups, including custom directory layouts.
 
-## What it does
-
-`spigotdl` accepts Spigot resource IDs or full Spigot resource URLs, resolves downloads through the Spigot API, saves plugins into a server's plugin directory, validates that each result is a real `.jar` file, and records downloaded plugins in a local registry so they can be updated later.
+ v1.3.0 adds a provider system for:
+- Spigot resources through Spiget
+- Modrinth projects
+- Hangar projects
 
 Example:
 
@@ -17,70 +30,52 @@ spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
 
 ## Features
 
-- **Simple plugin downloads**  
-  Download Spigot plugins using either a resource ID or full resource URL. Resource IDs are extracted automatically from supported URLs.
+- **Multi-source plugin search**  
+  Search Spigot, Modrinth, and Hangar from one command.
 
-- **Interactive and script-friendly usage**  
-  Use the interactive server picker for manual installs, or direct commands for scripts, automation, and repeatable workflows.
+- **Provider-aware downloads**  
+  Install by source-specific reference such as `spigot:19254`, `modrinth:luckperms`, or `hangar:ViaVersion/ViaVersion`.
+
+- **Interactive main menu**  
+  Quick access to search, install, batch, scan, update, and overview actions.
 
 - **Batch and multi-server installs**  
   Install multiple plugins at once, including batch files that target one server or multiple servers.
 
 - **Safe file handling**  
-  Preserves the original uploaded `.jar` filename when available, validates downloads with `unzip -t`, and backs up existing plugin files before replacing them.
+  Preserves the original uploaded `.jar` filename when available, validates downloads as jar/zip files, and backs up existing plugin files before replacing them.
 
-- **Plugin tracking and updates**  
-  Maintains a local plugin registry, can scan existing plugin folders, and can update tracked plugins for one server, selected servers, or all detected servers.
+- **Registry tracking**  
+  Tracks installed plugins by provider, project ID, version ID, filename, release type, loader/API, game version, and install source.
 
-- **Flexible server layouts**  
-  Supports custom server roots, config directories, plugin folder names, and direct `--server-dir` or `--plugin-dir` paths for non-standard setups.
+- **Scan and update workflow**  
+  Scan existing plugin folders into the registry, then update tracked plugins later.
 
-- **Configurable behavior**  
-  Supports system-wide config, per-user config, environment-variable overrides, and optional command suggestions.
+- **Overview/status dashboard**  
+  Lists detected servers, plugin counts, tracked/untracked counts, and update status with color-coded output.
+
+- **Flexible layouts**  
+  Supports custom server roots, config directories, plugin folder names, direct `--server-dir`, and direct `--plugin-dir`.
 
 ## Requirements
 
-- 5-10 minutes depending on install
-- An up-to-date & working Linux server _(hopefully)_
+- An up-to-date & working Linux machine _(hopefully)_
+- Python 3.8+
+- Direct filesystem access to Minecraft server files
+- A Bukkit/Spigot/Paper-compatible server plugin folder
 - Standard CLI tools: `curl`, `unzip`, `python3`, `find`, `file`, and GNU/coreutils tools.
-- Minnecraft server(s) running on bare-metal or of which the files can be accessed directly via CLI
-
-Install dependencies:
 
 Debian/Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y bash curl unzip python3 coreutils findutils file
-```
-
-RHEL/Fedora:
-
-```bash
-sudo dnf install -y bash curl unzip python3 coreutils findutils file
-```
-
-Arch Linux:
-
-```bash
-sudo pacman -S --needed bash curl unzip python coreutils findutils file
+sudo apt install -y python3
 ```
 
 ## Install
 
-Clone & enter the repository, then install the script into your bin:
-
-```bash
-git clone https://github.com/DALE-GH/spigotdl/
-cd ./spigotdl
-```
 ```bash
 sudo install -m 0755 spigotdl /usr/local/bin/spigotdl
-```
-
-Optional system config:
-
-```bash
 sudo install -m 0644 example.spigotdl.conf /etc/spigotdl.conf
 ```
 
@@ -88,530 +83,319 @@ Verify:
 
 ```bash
 spigotdl --version
-spigotdl --help
+spigotdl list
 ```
-_Depending on enviornment you may need to prefix the command with `sudo`_
 
-## Quick start
+## Main menu
 
-Interactive mode:
+Run without arguments:
 
 ```bash
 spigotdl
 ```
 
-Direct mode:
+or:
+
+```bash
+spigotdl menu
+```
+
+The main menu includes:
+
+```text
+Search plugins
+Install by ID / URL / provider ref
+Batch install
+Scan installed plugins
+Update tracked plugins
+Server overview
+List servers
+```
+
+## Search
+
+Search every provider:
+
+```bash
+spigotdl search viaversion
+```
+
+Search one provider:
+
+```bash
+spigotdl search luckperms --source modrinth
+spigotdl search viaversion --source spigot
+spigotdl search chunky --source hangar
+```
+
+Filter by API/loader:
+
+```bash
+spigotdl search essentials --api paper
+```
+
+Filter by Minecraft version:
+
+```bash
+spigotdl search viaversion --mc-version 1.21.11
+```
+
+Filter by release channel where the provider supports it:
+
+```bash
+spigotdl search luckperms --source modrinth --release release
+spigotdl search nova --source hangar --release snapshot
+```
+
+Sort:
+
+```bash
+spigotdl search essentials --sort downloads
+spigotdl search bluemap --sort updated
+```
+
+Search and install the first result:
+
+```bash
+spigotdl search viaversion --source modrinth --server survival --install
+```
+
+Search and choose interactively:
+
+```bash
+spigotdl search viaversion --server survival
+```
+
+## Plugin Install
+
+Install plugins directly by name or ID
 
 ```bash
 spigotdl survival 19254
 ```
 
-Using a full Spigot resource URL:
+Provider-specific installs:
 
 ```bash
-spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
+spigotdl install spigot:19254 --server survival
+spigotdl install modrinth:luckperms --server survival
+spigotdl install hangar:ViaVersion/ViaVersion --server survival
 ```
 
-Using flags:
+Using direct paths:
 
 ```bash
-spigotdl --server survival --resource 19254
+spigotdl install modrinth:luckperms --server-dir /srv/minecraft/survival
+spigotdl install modrinth:luckperms --plugin-dir /srv/minecraft/survival/plugins
 ```
 
-Using a direct server directory:
+Preview without downloading:
 
 ```bash
-spigotdl --server-dir /srv/minecraft/survival --resource 19254
+spigotdl install modrinth:luckperms --server survival --dry-run
 ```
 
-Using a direct plugins directory:
+## Batch install
 
-```bash
-spigotdl --plugin-dir /srv/minecraft/survival/plugins --resource 19254
-```
-
-List detected servers:
-
-```bash
-spigotdl --list
-```
-
-
-## Batch downloading
-
-Download multiple plugins in one command:
+Simple batch download by ID:
 
 ```bash
 spigotdl survival 19254 34315 6245
 ```
 
-Or by repeating `--resource`:
+One server:
 
 ```bash
-spigotdl --server survival --resource 19254 --resource 34315 --resource 6245
+spigotdl batch examples/plugins.txt --server survival
 ```
 
-### Batch file for one server
-
-Create `plugins.txt`:
+Example `plugins.txt`:
 
 ```text
-# resource-id-or-url [optional-output-name]
-19254
-https://www.spigotmc.org/resources/viaversion.19254/
-34315 SomePlugin.jar
+spigot:19254
+modrinth:luckperms
+hangar:ViaVersion/ViaVersion
 ```
 
-Run:
+Multi-server batch file:
 
 ```bash
-spigotdl --server survival --batch plugins.txt
+spigotdl batch examples/fleet-plugins.txt
 ```
 
-### Batch file for multiple servers
-
-Create `fleet-plugins.txt`:
+Example `fleet-plugins.txt`:
 
 ```text
-# server resource-id-or-url [optional-output-name]
-survival 19254
-lobby https://www.spigotmc.org/resources/viaversion.19254/
-hub 34315 SomePlugin.jar
+survival spigot:19254
+survival modrinth:luckperms
+lobby hangar:ViaVersion/ViaVersion
 ```
 
-Run:
 
-```bash
-spigotdl --batch fleet-plugins.txt
-```
+## Registry v2
 
-By default, batch mode continues after a failed download. Change that with:
-
-```bash
-SPIGOTDL_BATCH_CONTINUE_ON_ERROR=false spigotdl --server survival --batch plugins.txt
-```
-
-## Updating plugins
-
-`spigotdl` tracks plugins it downloads in a local registry:
+Registry files are stored per plugin folder:
 
 ```text
 <plugins-folder>/.spigotdl/registry.tsv
 ```
 
-You can update all tracked plugins for one server:
+Registry v2 columns:
+
+```text
+provider
+project_id
+version_id
+filename
+project_name
+release_type
+loaders
+game_versions
+installed_at
+source
+```
+
+_Older v1 registries are migrated automatically when found._
+
+## Scan existing plugins
+
+Scan a server and interactively match untracked jars:
 
 ```bash
-spigotdl --server survival --update
+spigotdl scan --server survival
+```
+
+Non-interactive scan mode:
+
+```bash
+spigotdl scan --server survival --yes
+```
+
+Scan using one source only:
+
+```bash
+spigotdl scan --server survival --source modrinth
+```
+
+## Update tracked plugins
+
+Update one server:
+
+```bash
+spigotdl update --server survival
 ```
 
 Update selected servers:
 
 ```bash
-spigotdl --servers survival,lobby --update
+spigotdl update --servers survival,lobby
 ```
 
 Update all detected servers:
 
 ```bash
-spigotdl --all --update
+spigotdl update --all
 ```
 
-Preview updates without changing files:
+Preview update checks:
 
 ```bash
-spigotdl --server survival --update --dry-run
+spigotdl update --all --dry-run
 ```
 
-### How update tracking works
+## Overview/status
 
-When `spigotdl` downloads a plugin, it records:
+Show all detected servers:
+
+```bash
+spigotdl overview
+```
+
+Show details:
+
+```bash
+spigotdl overview --details
+```
+
+Skip API checks:
+
+```bash
+spigotdl overview --no-check
+```
+
+Example output:
 
 ```text
-resource_id
-filename
-resource_name
-version_id
-installed_at
-source
-```
+[SPDL] Server Overview
 
-During `--update`, it checks the latest metadata for each tracked resource. If the latest version ID differs from the stored version ID, it downloads the newest jar, backs up the old file, and updates the registry.
-
-## Scanning existing plugin folders
-
-If you already have plugins installed, use `--scan` to build the registry:
-
-```bash
-spigotdl --server survival --scan
-```
-
-The scanner:
-
-1. Finds `.jar` files in the plugin directory.
-2. Guesses a search term from the filename.
-3. Searches Spiget for matching resources.
-4. Asks you which result to track.
-5. Adds the selected resource to `.spigotdl/registry.tsv`.
-
-Then update tracked plugins:
-
-```bash
-spigotdl --server survival --update
-```
-
-You can scan and update in one command:
-
-```bash
-spigotdl --server survival --scan --update
-```
-
-For multiple servers:
-
-```bash
-spigotdl --servers survival,lobby --scan --update
-```
-
-For all detected servers:
-
-```bash
-spigotdl --all --scan --update
-```
-
-### Non-interactive scan mode
-
-Use `--yes` to avoid prompts:
-
-```bash
-spigotdl --server survival --scan --yes
-```
-
-In `--yes` scan mode, `spigotdl` only auto-tracks exact non-premium matches. Unclear matches are skipped.
-
-## Supported server layouts
-
-`spigotdl` is not limited to one directory structure.
-
-By default, it checks:
-
-```text
-/opt/mc/<server>
-/etc/mc/<server>.conf
-```
-
-You can configure a different root:
-
-```bash
-SPIGOTDL_SERVER_ROOTS="/srv/minecraft" spigotdl --list
-```
-
-You can configure multiple roots:
-
-```bash
-SPIGOTDL_SERVER_ROOTS="/srv/minecraft:/opt/servers:/home/minecraft/servers" spigotdl --list
-```
-
-You can bypass auto-detection entirely:
-
-```bash
-spigotdl --server-dir /custom/path/to/server --resource 19254
-```
-
-or:
-
-```bash
-spigotdl --plugin-dir /custom/path/to/server/plugins --resource 19254
-```
-
-## Per-server config files
-
-If your setup stores server paths in config files, use:
-
-```text
-/etc/mc/<server>.conf
-```
-
-Example:
-
-```bash
-SERVER_DIR="/srv/minecraft/survival"
-```
-
-Then this:
-
-```bash
-spigotdl survival 19254
-```
-
-installs to:
-
-```text
-/srv/minecraft/survival/plugins
-```
-
-The variable name is configurable:
-
-```bash
-SPIGOTDL_SERVER_DIR_VAR="MINECRAFT_SERVER_DIR"
-```
-
-## Example output
-
-```text
-Done.
-Installed:
-  /srv/minecraft/survival/plugins/ViaVersion-5.4.2.jar
-
-Optional live-load command:
-  plugman load ViaVersion-5.4.2.jar
-```
-
-If you configure a restart command, the output can also include:
-
-```text
-Restart command:
-  sudo systemctl restart minecraft@survival
+Server              Plugins Tracked Untracked Outdated Status        Directory
+survival                 42      31        11        4 UPDATE        /srv/minecraft/survival
+lobby                    18      18         0        0 OK            /srv/minecraft/lobby
+proxy                     7       4         3        1 UPDATE        /srv/minecraft/proxy
 ```
 
 ## Configuration
 
-`spigotdl` loads configuration from:
+Config files:
 
 ```text
 /etc/spigotdl.conf
 ~/.config/spigotdl/config
 ```
 
-The user config overrides the system config.
-
-Environment variables can override settings for one run:
-
-```bash
-SPIGOTDL_FILENAME_MODE=resource spigotdl survival 19254
-```
-
-## Important config options
-
-### Server discovery
-
-```bash
-SPIGOTDL_SERVER_ROOTS="/opt/mc"
-```
-
-One or more base directories containing Minecraft server folders. Use `:` to separate multiple roots.
-
-```bash
-SPIGOTDL_SERVER_ROOTS="/srv/minecraft:/opt/mc:/home/minecraft/servers"
-```
-
-```bash
-SPIGOTDL_CONF_DIR="/etc/mc"
-```
-
-Directory containing optional per-server config files such as `survival.conf`.
-
-```bash
-SPIGOTDL_SERVER_DIR_VAR="SERVER_DIR"
-```
-
-Variable name inside each per-server config file that points to the actual server directory.
-
-```bash
-SPIGOTDL_PLUGINS_DIR_NAME="plugins"
-```
-
-Plugin folder name under each server directory.
-
-```bash
-SPIGOTDL_EXCLUDE_REGEX='(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$|^tmp$|^temp$)'
-```
-
-Folders matching this regex are hidden from the interactive server picker.
-
-### Filename behavior
-
-```bash
-SPIGOTDL_FILENAME_MODE="file"
-```
-
-Filename mode.
-
-Options:
-
-```text
-file       Use the original uploaded jar filename when available.
-resource   Use the Spigot resource/plugin name.
-resourceid Use resource-name-resource-id.jar.
-```
-
-### Safety behavior
-
-```bash
-SPIGOTDL_BACKUP_EXISTING="true"
-```
-
-Back up an existing jar before replacing it.
-
-```bash
-SPIGOTDL_REQUIRE_JAR="true"
-```
-
-Validate the downloaded file with `unzip -t`.
-
-```bash
-SPIGOTDL_AUTO_CHOWN="true"
-```
-
-Try to set the installed jar owner/group to match the plugin folder.
-
-```bash
-SPIGOTDL_INSTALL_MODE="0644"
-```
-
-File mode for installed jars.
-
-```bash
-SPIGOTDL_BATCH_CONTINUE_ON_ERROR="true"
-```
-
-Continue processing a batch file if one download fails.
-
-### Registry and update behavior
-
-```bash
-SPIGOTDL_REGISTRY_DIR_NAME=".spigotdl"
-SPIGOTDL_REGISTRY_FILE_NAME="registry.tsv"
-```
-
-Registry location under the plugin folder.
-
-```bash
-SPIGOTDL_SCAN_MAX_RESULTS="5"
-```
-
-Maximum search results shown for each untracked plugin during `--scan`.
-
-```bash
-SPIGOTDL_SCAN_AUTO_EXACT="true"
-```
-
-Reserved for scan behavior. Current `--yes` mode only auto-tracks exact non-premium matches.
-
-### Output behavior
-
-```bash
-SPIGOTDL_COLOR="auto"
-```
-
-Color mode.
-
-Options:
-
-```text
-auto
-always
-never
-```
-
-```bash
-SPIGOTDL_RESTART_CMD_TEMPLATE=''
-```
-
-Optional restart command printed after install. Empty by default because service names vary by setup.
-
 Example:
 
 ```bash
-SPIGOTDL_RESTART_CMD_TEMPLATE='sudo systemctl restart minecraft@{instance}'
+SPDL_SERVER_ROOTS="/srv/minecraft:/opt/mc"
+SPDL_CONF_DIR="/etc/mc"
+SPDL_PLUGINS_DIR_NAME="plugins"
+SPDL_DEFAULT_SOURCE="spigot"
+SPDL_RESTART_CMD_TEMPLATE='sudo systemctl restart minecraft@{instance}'
+SPDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
 ```
+
+Important options:
 
 ```bash
-SPIGOTDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
+SPDL_SERVER_ROOTS="/opt/mc"
+SPDL_CONF_DIR="/etc/mc"
+SPDL_SERVER_DIR_VAR="SERVER_DIR"
+SPDL_PLUGINS_DIR_NAME="plugins"
+SPDL_REGISTRY_DIR=".spigotdl"
+SPDL_REGISTRY_FILE="registry.tsv"
+SPDL_BACKUP_EXISTING="true"
+SPDL_VALIDATE_JAR="true"
+SPDL_COLOR="auto"
 ```
 
-Optional PlugMan command printed after install.
+## Provider notes
 
-Available placeholders:
+### Spigot / Spiget
 
-```text
-{instance}
-{filename}
-{dest}
-{server_dir}
-{plugin_dir}
-```
-
-Examples:
+Spigot downloads use the Spiget API. Resource IDs and full Spigot resource URLs are supported.
 
 ```bash
-SPIGOTDL_RESTART_CMD_TEMPLATE='sudo systemctl restart minecraft@{instance}'
-SPIGOTDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
+spigotdl install spigot:19254 --server survival
 ```
+
+### Modrinth
+
+Modrinth supports search facets for project type, loaders/categories, and Minecraft versions. The tool uses those filters when `--api` and `--mc-version` are provided.
 
 ```bash
-SPIGOTDL_RESTART_CMD_TEMPLATE='docker restart mc-{instance}'
-SPIGOTDL_PLUGMAN_CMD_TEMPLATE=''
+spigotdl search luckperms --source modrinth --api paper --mc-version 1.21.11
 ```
+
+### Hangar
+
+Hangar support is best-effort because its API has changed over time. Search and recommended download routes are implemented using the public API shape used by Hangar.
 
 ```bash
-SPIGOTDL_RESTART_CMD_TEMPLATE=''
-SPIGOTDL_PLUGMAN_CMD_TEMPLATE='screen -S {instance} -X stuff "plugman load {filename}\015"'
+spigotdl search viaversion --source hangar
 ```
-
-## Example config
-
-See [`example.spigotdl.conf`](example.spigotdl.conf).
-
-Minimal example:
-
-```bash
-SPIGOTDL_SERVER_ROOTS="/srv/minecraft"
-SPIGOTDL_CONF_DIR="/etc/minecraft/servers"
-SPIGOTDL_FILENAME_MODE="file"
-SPIGOTDL_RESTART_CMD_TEMPLATE='sudo systemctl restart minecraft@{instance}'
-SPIGOTDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
-```
-
-## Running without sudo
-
-`spigotdl` only needs write access to the target plugin directory.
-
-A simple group-based setup:
-
-```bash
-sudo groupadd -f minecraft-admins
-sudo usermod -aG minecraft-admins "$USER"
-
-sudo chgrp -R minecraft-admins /srv/minecraft/*/plugins
-sudo chmod -R g+rwX /srv/minecraft/*/plugins
-sudo find /srv/minecraft/*/plugins -type d -exec chmod g+s {} \;
-```
-
-Log out and back in, then test:
-
-```bash
-spigotdl survival 19254
-```
-
-If parent directories block traversal, allow group execute on those directories:
-
-```bash
-sudo chgrp minecraft-admins /srv/minecraft /srv/minecraft/*
-sudo chmod g+x /srv/minecraft /srv/minecraft/*
-```
-
-Adjust `/srv/minecraft` to match your server root.
 
 ## Limitations
 
-- This tool is intended for free Spigot resources.
-- Premium resources may require downloading through your Spigot account or another vendor-supported method.
-- Some resources use external download URLs. `spigotdl` warns before continuing and validates that the final download is a real `.jar`.
-- Automatic scanning is best-effort. Filenames do not always map cleanly to Spigot resource IDs.
-- `--update` is safest for plugins originally installed by `spigotdl` or manually confirmed through `--scan`.
-- This tool downloads plugin files. It does not guarantee plugin compatibility with your Minecraft, Java, Paper, Spigot, or proxy version.
-- Live-loading plugins with tools such as PlugMan may not be safe for every plugin. Restarting the server is usually the safer option.
-
-## License
-
-MIT
+- Premium or account-gated downloads are not supported.
+- Search filters vary by provider. Modrinth has the strongest structured filtering; Spigot and Hangar support fewer filters through public endpoints.
+- Automatic scan matching is best-effort.

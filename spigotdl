@@ -1,1213 +1,484 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+# V1.3.0 Major refactor - Enjoy the project :)
+import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
+from pathlib import Path
 
-SPIGOTDL_VERSION="1.2.0"
-
-# -------------------------------------------------------------------
-# spigotdl
-# Download free Spigot plugin jars from a terminal.
-#
-# Config precedence:
-#   1. Built-in defaults
-#   2. /etc/spigotdl.conf
-#   3. ~/.config/spigotdl/config
-#   4. CLI flags / environment variables
-# -------------------------------------------------------------------
-
-load_config_file() {
-  local file="$1"
-  [[ -f "$file" ]] || return 0
-  # shellcheck source=/dev/null
-  source "$file"
+VERSION = "1.3.0"
+REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
+DEFAULTS = {
+    "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
+    "SPDL_CONF_DIR": os.environ.get("SPIGOTDL_CONF_DIR", "/etc/mc"),
+    "SPDL_SERVER_DIR_VAR": os.environ.get("SPIGOTDL_SERVER_DIR_VAR", "SERVER_DIR"),
+    "SPDL_PLUGINS_DIR_NAME": os.environ.get("SPIGOTDL_PLUGINS_DIR_NAME", "plugins"),
+    "SPDL_EXCLUDE_REGEX": r"(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$|^tmp$|^temp$)",
+    "SPDL_REGISTRY_DIR": ".spigotdl", "SPDL_REGISTRY_FILE": "registry.tsv",
+    "SPDL_BACKUP_EXISTING": "true", "SPDL_VALIDATE_JAR": "true", "SPDL_AUTO_CHOWN": "true",
+    "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "10",
+    "SPDL_USER_AGENT": f"sp-dl/{VERSION} (+https://github.com/yourname/sp-dl)",
+    "SPDL_SPIGET_API": "https://api.spiget.org/v2", "SPDL_MODRINTH_API": "https://api.modrinth.com/v2", "SPDL_HANGAR_API": "https://hangar.papermc.io/api/v1",
+    "SPDL_RESTART_CMD_TEMPLATE": os.environ.get("SPIGOTDL_RESTART_CMD_TEMPLATE", ""),
+    "SPDL_PLUGMAN_CMD_TEMPLATE": os.environ.get("SPIGOTDL_PLUGMAN_CMD_TEMPLATE", "plugman load {filename}"),
+    "SPDL_BATCH_CONTINUE_ON_ERROR": "true",
 }
 
-load_config_file "/etc/spigotdl.conf"
-
-if [[ -n "${HOME:-}" ]]; then
-  load_config_file "$HOME/.config/spigotdl/config"
-fi
-
-SPIGOTDL_API_URL="${SPIGOTDL_API_URL:-https://api.spiget.org/v2}"
-SPIGOTDL_SERVER_ROOTS="${SPIGOTDL_SERVER_ROOTS:-${SPIGOTDL_MC_ROOT:-/opt/mc}}"
-SPIGOTDL_CONF_DIR="${SPIGOTDL_CONF_DIR:-/etc/mc}"
-SPIGOTDL_SERVER_DIR_VAR="${SPIGOTDL_SERVER_DIR_VAR:-SERVER_DIR}"
-SPIGOTDL_PLUGINS_DIR_NAME="${SPIGOTDL_PLUGINS_DIR_NAME:-plugins}"
-SPIGOTDL_EXCLUDE_REGEX="${SPIGOTDL_EXCLUDE_REGEX:-(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$|^tmp$|^temp$)}"
-
-# Filename modes:
-#   file       = prefer original uploaded .jar filename from metadata
-#   resource   = use Spigot resource/plugin name
-#   resourceid = use resource-name-resource-id.jar
-SPIGOTDL_FILENAME_MODE="${SPIGOTDL_FILENAME_MODE:-file}"
-
-SPIGOTDL_BACKUP_EXISTING="${SPIGOTDL_BACKUP_EXISTING:-true}"
-SPIGOTDL_AUTO_CHOWN="${SPIGOTDL_AUTO_CHOWN:-true}"
-SPIGOTDL_REQUIRE_JAR="${SPIGOTDL_REQUIRE_JAR:-true}"
-SPIGOTDL_YES="${SPIGOTDL_YES:-false}"
-SPIGOTDL_COLOR="${SPIGOTDL_COLOR:-auto}"
-SPIGOTDL_INSTALL_MODE="${SPIGOTDL_INSTALL_MODE:-0644}"
-SPIGOTDL_USER_AGENT="${SPIGOTDL_USER_AGENT:-Mozilla/5.0 spigotdl/${SPIGOTDL_VERSION}}"
-SPIGOTDL_BATCH_CONTINUE_ON_ERROR="${SPIGOTDL_BATCH_CONTINUE_ON_ERROR:-true}"
-
-# Registry used by --update. Stored inside each plugins folder by default.
-SPIGOTDL_REGISTRY_DIR_NAME="${SPIGOTDL_REGISTRY_DIR_NAME:-.spigotdl}"
-SPIGOTDL_REGISTRY_FILE_NAME="${SPIGOTDL_REGISTRY_FILE_NAME:-registry.tsv}"
-
-# Scan behavior. --scan can build registry entries from existing jars.
-SPIGOTDL_SCAN_MAX_RESULTS="${SPIGOTDL_SCAN_MAX_RESULTS:-5}"
-SPIGOTDL_SCAN_AUTO_EXACT="${SPIGOTDL_SCAN_AUTO_EXACT:-true}"
-
-# Optional command suggestions printed after install.
-# Set either to an empty string to hide it.
-# Available placeholders:
-#   {instance}
-#   {filename}
-#   {dest}
-#   {server_dir}
-#   {plugin_dir}
-SPIGOTDL_RESTART_CMD_TEMPLATE="${SPIGOTDL_RESTART_CMD_TEMPLATE:-}"
-SPIGOTDL_PLUGMAN_CMD_TEMPLATE="${SPIGOTDL_PLUGMAN_CMD_TEMPLATE:-plugman load {filename}}"
-
-C_RESET=""
-C_BOLD=""
-C_RED=""
-C_GREEN=""
-C_YELLOW=""
-C_BLUE=""
-C_CYAN=""
-C_DIM=""
-
-init_color() {
-  if [[ "${SPIGOTDL_COLOR}" == "never" || -n "${NO_COLOR:-}" ]]; then
-    return 0
-  fi
-
-  if [[ "${SPIGOTDL_COLOR}" == "always" || ( "${SPIGOTDL_COLOR}" == "auto" && -t 1 ) ]]; then
-    C_RESET=$'\033[0m'
-    C_BOLD=$'\033[1m'
-    C_RED=$'\033[31m'
-    C_GREEN=$'\033[32m'
-    C_YELLOW=$'\033[33m'
-    C_BLUE=$'\033[34m'
-    C_CYAN=$'\033[36m'
-    C_DIM=$'\033[2m'
-  fi
-}
-
-die() {
-  echo "${C_RED}${C_BOLD}ERROR:${C_RESET} $*" >&2
-  exit 1
-}
-
-warn() {
-  echo "${C_YELLOW}${C_BOLD}WARNING:${C_RESET} $*" >&2
-}
-
-truthy() {
-  case "${1:-}" in
-    1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
-}
-
-usage() {
-  cat <<'HELP'
-spigotdl - Download and update free Spigot plugin jars from the CLI
-
-Usage:
-  spigotdl
-  spigotdl <server> <resource...>
-  spigotdl --server <server> --resource <id-or-link>
-  spigotdl --server <server> --batch plugins.txt
-  spigotdl --server <server> --update
-  spigotdl --server <server> --scan
-  spigotdl --server <server> --scan --update
-  spigotdl --servers survival,lobby --update
-  spigotdl --all --update
-  spigotdl --server-dir <path> --resource <id-or-link>
-  spigotdl --plugin-dir <path> --resource <id-or-link>
-  spigotdl --list
-
-Examples:
-  spigotdl survival 19254
-  spigotdl survival 19254 34315 6245
-  spigotdl --server survival --resource 19254 --resource 34315
-  spigotdl --server survival --batch plugins.txt
-  spigotdl --batch fleet-plugins.txt
-  spigotdl --server survival --scan
-  spigotdl --server survival --update
-  spigotdl --servers survival,lobby --scan --update --yes
-  spigotdl --all --update --dry-run
-
-Options:
-  -s, --server NAME        Server instance name
-      --servers A,B,C      Comma-separated server instance list
-      --all                Use all detected servers for --scan/--update
-  -r, --resource VALUE     Spigot resource ID or full Spigot resource URL. May be repeated.
-  -b, --batch FILE         Batch file. May be used with --server or contain server names.
-      --scan               Scan existing jars and add matches to the local registry
-      --update             Update plugins listed in the local registry
-      --dry-run            Show what would happen without downloading or changing files
-      --server-dir PATH    Direct server directory override
-      --plugin-dir PATH    Direct plugins directory override
-  -n, --name FILE.jar      Override output filename for a single resource
-  -y, --yes                Do not prompt for external downloads or scan matches
-      --list               List detected server instances
-      --no-color           Disable color output
-      --version            Show version
-  -h, --help               Show help
-
-Batch file formats:
-  With --server:
-    19254
-    https://www.spigotmc.org/resources/viaversion.19254/
-    19254 ViaVersion.jar
-
-  Without --server:
-    survival 19254
-    lobby https://www.spigotmc.org/resources/viaversion.19254/
-    survival 19254 ViaVersion.jar
-
-Config files:
-  /etc/spigotdl.conf
-  ~/.config/spigotdl/config
-HELP
-}
-
-json_get() {
-  local key="$1"
-
-  python3 -c '
-import json
-import sys
-
-key = sys.argv[1]
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    print("")
-    sys.exit(0)
-
-value = data
-for part in key.split("."):
-    if isinstance(value, dict):
-        value = value.get(part, "")
-    else:
-        value = ""
-        break
-
-if value is None:
-    value = ""
-
-print(value)
-' "$key"
-}
-
-urlencode() {
-  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
-}
-
-normalize_text() {
-  python3 -c 'import re, sys; print(re.sub(r"[^a-z0-9]+", "", sys.argv[1].lower()))' "$1"
-}
-
-safe_filename() {
-  local name="$1"
-
-  if [[ -z "$name" ]]; then
-    name="spigot-resource"
-  fi
-
-  printf '%s\n' "$name" \
-    | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//'
-}
-
-guess_resource_query() {
-  local file="$1"
-  local base
-  base="$(basename "$file")"
-  base="${base%.jar}"
-  base="${base%.JAR}"
-
-  # Strip common trailing version suffixes, such as:
-  # ViaVersion-5.4.2 -> ViaVersion
-  # EssentialsX-2.21.0-dev -> EssentialsX
-  printf '%s\n' "$base" \
-    | sed -E 's/[-_ .]+v?[0-9][A-Za-z0-9._+-]*$//' \
-    | sed -E 's/[-_ .]+(bukkit|spigot|paper)$//I'
-}
-
-extract_resource_id() {
-  local input="$1"
-
-  input="${input%%\?*}"
-  input="${input%%#*}"
-
-  if [[ "$input" =~ ^[0-9]+$ ]]; then
-    echo "$input"
-    return 0
-  fi
-
-  if [[ "$input" =~ resources/[^/]*\.([0-9]+) ]]; then
-    echo "${BASH_REMATCH[1]}"
-    return 0
-  fi
-
-  local last_number
-  last_number="$(printf '%s\n' "$input" | grep -Eo '[0-9]+' | tail -n1 || true)"
-
-  if [[ -n "$last_number" ]]; then
-    echo "$last_number"
-    return 0
-  fi
-
-  return 1
-}
-
-split_roots() {
-  tr ':' '\n' <<<"$SPIGOTDL_SERVER_ROOTS" | sed '/^[[:space:]]*$/d'
-}
-
-split_commas() {
-  tr ',' '\n' <<<"$1" | sed '/^[[:space:]]*$/d'
-}
-
-list_instances() {
-  {
-    if [[ -d "$SPIGOTDL_CONF_DIR" ]]; then
-      find "$SPIGOTDL_CONF_DIR" -maxdepth 1 -type f -name "*.conf" -printf "%f\n" 2>/dev/null | sed 's/\.conf$//'
-    fi
-
-    while IFS= read -r root; do
-      [[ -d "$root" ]] || continue
-      find "$root" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null
-    done < <(split_roots)
-  } | grep -Ev "$SPIGOTDL_EXCLUDE_REGEX" | sort -u
-}
-
-server_dir_from_instance() {
-  local instance="$1"
-  local conf="${SPIGOTDL_CONF_DIR}/${instance}.conf"
-  local dir=""
-
-  if [[ -f "$conf" ]]; then
-    dir="$(
-      awk -F= -v key="$SPIGOTDL_SERVER_DIR_VAR" '
-        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
-          val=$0
-          sub(/^[^=]*=/, "", val)
-          gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", val)
-          print val
-          exit
-        }
-      ' "$conf"
-    )"
-  fi
-
-  if [[ -n "$dir" ]]; then
-    printf '%s\n' "$dir"
-    return 0
-  fi
-
-  while IFS= read -r root; do
-    [[ -d "${root}/${instance}" ]] || continue
-    printf '%s\n' "${root}/${instance}"
-    return 0
-  done < <(split_roots)
-
-  local first_root
-  first_root="$(split_roots | head -n 1)"
-  printf '%s/%s\n' "${first_root:-/opt/mc}" "$instance"
-}
-
-choose_instance() {
-  local instances=()
-  mapfile -t instances < <(list_instances)
-
-  if [[ "${#instances[@]}" -eq 0 ]]; then
-    echo "No server instances were auto-detected." >&2
-    echo "Configure SPIGOTDL_SERVER_ROOTS, create ${SPIGOTDL_CONF_DIR}/<server>.conf, or use --server-dir/--plugin-dir." >&2
-    read -rp "Type server instance name manually: " manual
-    [[ -n "$manual" ]] || die "No server instance provided."
-    echo "$manual"
-    return 0
-  fi
-
-  echo "Available Minecraft servers:" >&2
-
-  local i
-  for i in "${!instances[@]}"; do
-    printf '  %s) %s\n' "$((i + 1))" "${instances[$i]}" >&2
-  done
-
-  echo >&2
-  read -rp "Install to which server? Type number or name: " choice
-  [[ -n "$choice" ]] || die "No server selected."
-
-  if [[ "$choice" =~ ^[0-9]+$ ]]; then
-    local index=$((choice - 1))
-    [[ "$index" -ge 0 && "$index" -lt "${#instances[@]}" ]] || die "Invalid server selection."
-    echo "${instances[$index]}"
-  else
-    echo "$choice"
-  fi
-}
-
-resolve_dirs() {
-  local instance="$1"
-  local server_dir_arg="$2"
-  local plugin_dir_arg="$3"
-
-  if [[ -n "$plugin_dir_arg" ]]; then
-    RESOLVED_PLUGIN_DIR="$plugin_dir_arg"
-    RESOLVED_SERVER_DIR="$(dirname "$plugin_dir_arg")"
-  elif [[ -n "$server_dir_arg" ]]; then
-    RESOLVED_SERVER_DIR="$server_dir_arg"
-    RESOLVED_PLUGIN_DIR="${RESOLVED_SERVER_DIR}/${SPIGOTDL_PLUGINS_DIR_NAME}"
-  else
-    RESOLVED_SERVER_DIR="$(server_dir_from_instance "$instance")"
-    RESOLVED_PLUGIN_DIR="${RESOLVED_SERVER_DIR}/${SPIGOTDL_PLUGINS_DIR_NAME}"
-  fi
-
-  [[ -d "$RESOLVED_SERVER_DIR" ]] || die "Server directory does not exist: $RESOLVED_SERVER_DIR"
-  mkdir -p "$RESOLVED_PLUGIN_DIR" 2>/dev/null || die "Cannot create or access plugin directory: $RESOLVED_PLUGIN_DIR"
-}
-
-render_template() {
-  local template="$1"
-  local instance="$2"
-  local filename="$3"
-  local dest="$4"
-  local server_dir="$5"
-  local plugin_dir="$6"
-
-  template="${template//\{instance\}/$instance}"
-  template="${template//\{filename\}/$filename}"
-  template="${template//\{dest\}/$dest}"
-  template="${template//\{server_dir\}/$server_dir}"
-  template="${template//\{plugin_dir\}/$plugin_dir}"
-
-  printf '%s\n' "$template"
-}
-
-registry_path() {
-  local plugin_dir="$1"
-  printf '%s/%s/%s\n' "$plugin_dir" "$SPIGOTDL_REGISTRY_DIR_NAME" "$SPIGOTDL_REGISTRY_FILE_NAME"
-}
-
-ensure_registry() {
-  local plugin_dir="$1"
-  local registry
-  registry="$(registry_path "$plugin_dir")"
-
-  mkdir -p "$(dirname "$registry")"
-
-  if [[ ! -f "$registry" ]]; then
-    printf 'resource_id\tfilename\tresource_name\tversion_id\tinstalled_at\tsource\n' > "$registry"
-  fi
-}
-
-tsv_clean() {
-  printf '%s' "${1:-}" | tr '\t\r\n' '   '
-}
-
-registry_has_resource() {
-  local plugin_dir="$1"
-  local resource_id="$2"
-  local registry
-  registry="$(registry_path "$plugin_dir")"
-
-  [[ -f "$registry" ]] || return 1
-  awk -F'\t' -v id="$resource_id" 'NR > 1 && $1 == id { found=1 } END { exit !found }' "$registry"
-}
-
-registry_has_filename() {
-  local plugin_dir="$1"
-  local filename="$2"
-  local registry
-  registry="$(registry_path "$plugin_dir")"
-
-  [[ -f "$registry" ]] || return 1
-  awk -F'\t' -v name="$filename" 'NR > 1 && $2 == name { found=1 } END { exit !found }' "$registry"
-}
-
-registry_upsert() {
-  local plugin_dir="$1"
-  local resource_id="$2"
-  local filename="$3"
-  local resource_name="$4"
-  local version_id="$5"
-  local source="$6"
-
-  ensure_registry "$plugin_dir"
-
-  local registry tmp installed_at
-  registry="$(registry_path "$plugin_dir")"
-  tmp="$(mktemp)"
-  installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  awk -F'\t' -v id="$resource_id" 'NR == 1 || $1 != id' "$registry" > "$tmp" || true
-
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(tsv_clean "$resource_id")" \
-    "$(tsv_clean "$filename")" \
-    "$(tsv_clean "$resource_name")" \
-    "$(tsv_clean "$version_id")" \
-    "$(tsv_clean "$installed_at")" \
-    "$(tsv_clean "$source")" >> "$tmp"
-
-  mv "$tmp" "$registry"
-}
-
-make_output_name() {
-  local resource_id="$1"
-  local resource_name="$2"
-  local file_name="$3"
-  local override_name="$4"
-  local raw_name=""
-
-  if [[ -n "$override_name" ]]; then
-    raw_name="$override_name"
-  else
-    case "$SPIGOTDL_FILENAME_MODE" in
-      file)
-        raw_name="${file_name:-}"
-        [[ -n "$raw_name" ]] || raw_name="${resource_name:-spigot-resource-${resource_id}}"
-        ;;
-      resource)
-        raw_name="${resource_name:-spigot-resource-${resource_id}}"
-        ;;
-      resourceid)
-        raw_name="${resource_name:-spigot-resource}-${resource_id}"
-        ;;
-      *)
-        die "Invalid SPIGOTDL_FILENAME_MODE: $SPIGOTDL_FILENAME_MODE"
-        ;;
-    esac
-  fi
-
-  local clean_name
-  clean_name="$(safe_filename "$raw_name")"
-  [[ -n "$clean_name" ]] || clean_name="spigot-resource-${resource_id}.jar"
-
-  if [[ "$clean_name" =~ \.jar$ ]]; then
-    printf '%s\n' "$clean_name"
-  else
-    printf '%s.jar\n' "$clean_name"
-  fi
-}
-
-fetch_metadata() {
-  local resource_id="$1"
-  curl -fsSL "${SPIGOTDL_API_URL}/resources/${resource_id}"
-}
-
-download_resource() {
-  local instance="$1"
-  local server_dir="$2"
-  local plugin_dir="$3"
-  local input="$4"
-  local output_override="${5:-}"
-  local old_filename="${6:-}"
-  local source="${7:-manual}"
-
-  local resource_id
-  resource_id="$(extract_resource_id "$input")" || die "Could not extract a resource ID from: $input"
-
-  echo
-  echo "${C_CYAN}${C_BOLD}Server          :${C_RESET} $instance"
-  echo "${C_CYAN}${C_BOLD}Server dir      :${C_RESET} $server_dir"
-  echo "${C_CYAN}${C_BOLD}Plugin dir      :${C_RESET} $plugin_dir"
-  echo "${C_CYAN}${C_BOLD}Resource ID     :${C_RESET} $resource_id"
-  echo
-
-  local meta
-  meta="$(fetch_metadata "$resource_id" || true)"
-  [[ -n "$meta" ]] || die "Could not fetch metadata for resource ID $resource_id"
-
-  local resource_name file_name external premium file_type version
-  resource_name="$(printf '%s' "$meta" | json_get "name")"
-  file_name="$(printf '%s' "$meta" | json_get "file.name")"
-  external="$(printf '%s' "$meta" | json_get "external")"
-  premium="$(printf '%s' "$meta" | json_get "premium")"
-  file_type="$(printf '%s' "$meta" | json_get "file.type")"
-  version="$(printf '%s' "$meta" | json_get "version.id")"
-
-  if truthy "$premium"; then
-    die "This appears to be a premium Spigot resource. Download it through the vendor-supported method instead."
-  fi
-
-  if truthy "$external"; then
-    warn "This resource uses an external download URL."
-    echo "The script will continue, but it will reject the download if it is not a valid .jar."
-    echo
-
-    if ! truthy "$SPIGOTDL_YES"; then
-      read -rp "Continue? [y/N]: " confirm
-      [[ "$confirm" =~ ^[Yy]$ ]] || die "Cancelled."
-    fi
-  fi
-
-  local output_name
-  output_name="$(make_output_name "$resource_id" "$resource_name" "$file_name" "$output_override")"
-
-  echo "${C_CYAN}${C_BOLD}Plugin name     :${C_RESET} ${resource_name:-unknown}"
-  echo "${C_CYAN}${C_BOLD}Original file   :${C_RESET} ${file_name:-unknown}"
-  echo "${C_CYAN}${C_BOLD}File type       :${C_RESET} ${file_type:-unknown}"
-  echo "${C_CYAN}${C_BOLD}Version ID      :${C_RESET} ${version:-unknown}"
-  echo "${C_CYAN}${C_BOLD}Output file     :${C_RESET} $output_name"
-  echo
-
-  local dest="${plugin_dir}/${output_name}"
-
-  if truthy "$SPIGOTDL_DRY_RUN"; then
-    echo "${C_YELLOW}${C_BOLD}Dry run:${C_RESET} would download $resource_id to $dest"
-    LAST_OUTPUT_NAME="$output_name"
-    LAST_RESOURCE_NAME="$resource_name"
-    LAST_VERSION_ID="$version"
-    LAST_RESOURCE_ID="$resource_id"
-    return 0
-  fi
-
-  local tmp
-  tmp="$(mktemp "/tmp/spigotdl-${resource_id}.XXXXXX.jar")"
-
-  echo "${C_BLUE}Downloading...${C_RESET}"
-  curl -fL --retry 3 --connect-timeout 20 \
-    -A "$SPIGOTDL_USER_AGENT" \
-    -o "$tmp" \
-    "${SPIGOTDL_API_URL}/resources/${resource_id}/download"
-
-  if truthy "$SPIGOTDL_REQUIRE_JAR"; then
-    echo "${C_BLUE}Validating jar...${C_RESET}"
-
-    if ! unzip -t "$tmp" >/dev/null 2>&1; then
-      local bad="/tmp/spigotdl-${resource_id}.bad"
-      mv "$tmp" "$bad"
-
-      echo
-      echo "Downloaded file is not a valid jar."
-      echo "Saved bad file to: $bad"
-      echo
-      file "$bad" || true
-      echo
-      echo "First few lines:"
-      head -n 10 "$bad" || true
-      echo
-      die "Download failed validation."
-    fi
-  fi
-
-  if [[ -e "$dest" ]] && truthy "$SPIGOTDL_BACKUP_EXISTING"; then
-    local backup="${dest}.bak.$(date +%Y%m%d-%H%M%S)"
-    echo "Existing file found. Backing up:"
-    echo "  $backup"
-    mv "$dest" "$backup"
-  fi
-
-  install -m "$SPIGOTDL_INSTALL_MODE" "$tmp" "$dest"
-  rm -f "$tmp"
-
-  if [[ -n "$old_filename" && "$old_filename" != "$output_name" && -e "${plugin_dir}/${old_filename}" ]]; then
-    local old_backup="${plugin_dir}/${old_filename}.bak.$(date +%Y%m%d-%H%M%S)"
-    echo "Old filename changed. Backing up old jar:"
-    echo "  $old_backup"
-    mv "${plugin_dir}/${old_filename}" "$old_backup"
-  fi
-
-  if truthy "$SPIGOTDL_AUTO_CHOWN"; then
-    local owner_group
-    owner_group="$(stat -c '%U:%G' "$plugin_dir" 2>/dev/null || true)"
-
-    if [[ -n "$owner_group" && "$owner_group" != "UNKNOWN:UNKNOWN" ]]; then
-      chown "$owner_group" "$dest" 2>/dev/null || true
-    fi
-  fi
-
-  registry_upsert "$plugin_dir" "$resource_id" "$output_name" "$resource_name" "$version" "$source"
-
-  LAST_OUTPUT_NAME="$output_name"
-  LAST_RESOURCE_NAME="$resource_name"
-  LAST_VERSION_ID="$version"
-  LAST_RESOURCE_ID="$resource_id"
-
-  local restart_cmd plugman_cmd
-  echo
-  echo "${C_GREEN}${C_BOLD}Done.${C_RESET}"
-  echo "${C_CYAN}${C_BOLD}Installed:${C_RESET}"
-  echo "  ${C_GREEN}$dest${C_RESET}"
-
-  if [[ -n "$SPIGOTDL_RESTART_CMD_TEMPLATE" ]]; then
-    restart_cmd="$(render_template "$SPIGOTDL_RESTART_CMD_TEMPLATE" "$instance" "$output_name" "$dest" "$server_dir" "$plugin_dir")"
-    echo
-    echo "${C_YELLOW}${C_BOLD}Restart command:${C_RESET}"
-    echo "  ${C_BLUE}$restart_cmd${C_RESET}"
-  fi
-
-  if [[ -n "$SPIGOTDL_PLUGMAN_CMD_TEMPLATE" ]]; then
-    plugman_cmd="$(render_template "$SPIGOTDL_PLUGMAN_CMD_TEMPLATE" "$instance" "$output_name" "$dest" "$server_dir" "$plugin_dir")"
-    echo
-    echo "${C_YELLOW}${C_BOLD}Optional live-load command:${C_RESET}"
-    echo "  ${C_BLUE}$plugman_cmd${C_RESET}"
-  fi
-}
-
-run_download_safely() {
-  local instance="$1"
-  local server_dir="$2"
-  local plugin_dir="$3"
-  local resource="$4"
-  local output_name="${5:-}"
-  local old_filename="${6:-}"
-  local source="${7:-manual}"
-
-  if download_resource "$instance" "$server_dir" "$plugin_dir" "$resource" "$output_name" "$old_filename" "$source"; then
-    return 0
-  fi
-
-  if truthy "$SPIGOTDL_BATCH_CONTINUE_ON_ERROR"; then
-    warn "Continuing after failed download: $resource"
-    return 0
-  fi
-
-  return 1
-}
-
-parse_candidates() {
-  python3 -c '
-import json
-import sys
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-
-if isinstance(data, dict):
-    data = data.get("data", [])
-
-if not isinstance(data, list):
-    sys.exit(0)
-
-for item in data:
-    if not isinstance(item, dict):
-        continue
-    rid = item.get("id", "")
-    name = item.get("name", "")
-    downloads = item.get("downloads", "")
-    premium = item.get("premium", "")
-    external = item.get("external", "")
-    version = item.get("version", {})
-    file_obj = item.get("file", {})
-    version_id = version.get("id", "") if isinstance(version, dict) else ""
-    file_name = file_obj.get("name", "") if isinstance(file_obj, dict) else ""
-    print(f"{rid}\t{name}\t{downloads}\t{premium}\t{external}\t{version_id}\t{file_name}")
-'
-}
-
-search_candidates() {
-  local query="$1"
-  local encoded
-  encoded="$(urlencode "$query")"
-
-  curl -fsSL "${SPIGOTDL_API_URL}/search/resources/${encoded}?size=${SPIGOTDL_SCAN_MAX_RESULTS}" | parse_candidates
-}
-
-scan_server() {
-  local instance="$1"
-  local server_dir="$2"
-  local plugin_dir="$3"
-
-  echo
-  echo "${C_CYAN}${C_BOLD}Scanning server:${C_RESET} $instance"
-  echo "${C_CYAN}${C_BOLD}Plugin dir     :${C_RESET} $plugin_dir"
-
-  ensure_registry "$plugin_dir"
-
-  local jar count=0 added=0 skipped=0
-  shopt -s nullglob
-
-  for jar in "$plugin_dir"/*.jar "$plugin_dir"/*.JAR; do
-    [[ -f "$jar" ]] || continue
-
-    local filename query candidates candidate_count selected_id selected_name selected_version selected_file choice
-    filename="$(basename "$jar")"
-
-    if registry_has_filename "$plugin_dir" "$filename"; then
-      echo "${C_DIM}Already tracked:${C_RESET} $filename"
-      continue
-    fi
-
-    count=$((count + 1))
-    query="$(guess_resource_query "$filename")"
-    [[ -n "$query" ]] || query="${filename%.jar}"
-
-    echo
-    echo "${C_CYAN}${C_BOLD}Untracked jar:${C_RESET} $filename"
-    echo "Search query: $query"
-
-    candidates="$(search_candidates "$query" || true)"
-    candidate_count="$(printf '%s\n' "$candidates" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-
-    if [[ "$candidate_count" -eq 0 ]]; then
-      warn "No candidates found for $filename"
-      skipped=$((skipped + 1))
-      continue
-    fi
-
-    selected_id=""
-    selected_name=""
-    selected_version=""
-    selected_file=""
-
-    if truthy "$SPIGOTDL_YES"; then
-      local query_norm cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file cand_norm
-      query_norm="$(normalize_text "$query")"
-
-      while IFS=$'\t' read -r cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file; do
-        cand_norm="$(normalize_text "$cand_name")"
-
-        if [[ "$cand_norm" == "$query_norm" ]] && ! truthy "$cand_premium"; then
-          selected_id="$cand_id"
-          selected_name="$cand_name"
-          selected_version="$cand_version"
-          selected_file="$cand_file"
-          break
-        fi
-      done <<<"$candidates"
-
-      if [[ -z "$selected_id" ]]; then
-        warn "No exact non-premium match found for $filename in --yes mode. Skipping."
-        skipped=$((skipped + 1))
-        continue
-      fi
-    else
-      echo "Candidates:"
-      local i=1 cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file
-      while IFS=$'\t' read -r cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file; do
-        printf '  %s) [%s] %s  downloads=%s premium=%s external=%s file=%s\n' \
-          "$i" "$cand_id" "$cand_name" "$cand_downloads" "$cand_premium" "$cand_external" "${cand_file:-unknown}"
-        i=$((i + 1))
-      done <<<"$candidates"
-
-      echo "  s) skip"
-      read -rp "Track which candidate for ${filename}? " choice
-
-      if [[ "$choice" =~ ^[Ss]$ || -z "$choice" ]]; then
-        skipped=$((skipped + 1))
-        continue
-      fi
-
-      if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 || "$choice" -gt "$candidate_count" ]]; then
-        warn "Invalid selection. Skipping $filename."
-        skipped=$((skipped + 1))
-        continue
-      fi
-
-      local selected_line
-      selected_line="$(printf '%s\n' "$candidates" | sed -n "${choice}p")"
-      IFS=$'\t' read -r selected_id selected_name _ _ _ selected_version selected_file <<<"$selected_line"
-    fi
-
-    if [[ -z "$selected_id" ]]; then
-      skipped=$((skipped + 1))
-      continue
-    fi
-
-    if truthy "$SPIGOTDL_DRY_RUN"; then
-      echo "${C_YELLOW}${C_BOLD}Dry run:${C_RESET} would track $filename as [$selected_id] $selected_name"
-    else
-      registry_upsert "$plugin_dir" "$selected_id" "$filename" "$selected_name" "$selected_version" "scan"
-      echo "${C_GREEN}Tracked:${C_RESET} $filename -> [$selected_id] $selected_name"
-    fi
-
-    added=$((added + 1))
-  done
-
-  shopt -u nullglob
-
-  echo
-  echo "${C_GREEN}${C_BOLD}Scan complete.${C_RESET}"
-  echo "Found untracked jars : $count"
-  echo "Added to registry    : $added"
-  echo "Skipped              : $skipped"
-}
-
-update_server() {
-  local instance="$1"
-  local server_dir="$2"
-  local plugin_dir="$3"
-  local registry
-  registry="$(registry_path "$plugin_dir")"
-
-  echo
-  echo "${C_CYAN}${C_BOLD}Updating server:${C_RESET} $instance"
-  echo "${C_CYAN}${C_BOLD}Registry       :${C_RESET} $registry"
-
-  if [[ ! -f "$registry" ]]; then
-    warn "No registry found for $instance. Run: spigotdl --server $instance --scan"
-    return 0
-  fi
-
-  local checked=0 updated=0 skipped=0 failed=0
-
-  while IFS=$'\t' read -r resource_id filename resource_name version_id installed_at source; do
-    [[ "$resource_id" == "resource_id" ]] && continue
-    [[ -z "$resource_id" ]] && continue
-
-    checked=$((checked + 1))
-
-    local meta latest_version latest_file latest_name
-    meta="$(fetch_metadata "$resource_id" || true)"
-
-    if [[ -z "$meta" ]]; then
-      warn "Could not fetch metadata for $resource_id ($filename)"
-      failed=$((failed + 1))
-      continue
-    fi
-
-    latest_name="$(printf '%s' "$meta" | json_get "name")"
-    latest_file="$(printf '%s' "$meta" | json_get "file.name")"
-    latest_version="$(printf '%s' "$meta" | json_get "version.id")"
-
-    if [[ -n "$version_id" && -n "$latest_version" && "$version_id" == "$latest_version" ]]; then
-      echo "${C_DIM}Up to date:${C_RESET} ${resource_name:-$latest_name} ($filename)"
-      skipped=$((skipped + 1))
-      continue
-    fi
-
-    echo
-    echo "${C_YELLOW}${C_BOLD}Update available or version unknown:${C_RESET} ${resource_name:-$latest_name}"
-    echo "  Current version ID : ${version_id:-unknown}"
-    echo "  Latest version ID  : ${latest_version:-unknown}"
-    echo "  Current file       : ${filename:-unknown}"
-    echo "  Latest file        : ${latest_file:-unknown}"
-
-    if ! run_download_safely "$instance" "$server_dir" "$plugin_dir" "$resource_id" "" "$filename" "update"; then
-      failed=$((failed + 1))
-      continue
-    fi
-
-    updated=$((updated + 1))
-  done < "$registry"
-
-  echo
-  echo "${C_GREEN}${C_BOLD}Update complete.${C_RESET}"
-  echo "Checked : $checked"
-  echo "Updated : $updated"
-  echo "Skipped : $skipped"
-  echo "Failed  : $failed"
-}
-
-process_batch_file() {
-  local batch_file="$1"
-  local default_instance="$2"
-  local default_server_dir="$3"
-  local default_plugin_dir="$4"
-
-  [[ -f "$batch_file" ]] || die "Batch file does not exist: $batch_file"
-
-  local line_no=0 processed=0
-  local line
-
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line_no=$((line_no + 1))
-
-    line="${line%%#*}"
-    line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
-    [[ -z "$line" ]] && continue
-
-    local parts=()
-    read -r -a parts <<<"$line"
-
-    local instance server_dir plugin_dir resource output_name
-
-    if [[ -n "$default_instance" || -n "$default_plugin_dir" || -n "$default_server_dir" ]]; then
-      resource="${parts[0]:-}"
-      output_name="${parts[1]:-}"
-      instance="$default_instance"
-      server_dir="$default_server_dir"
-      plugin_dir="$default_plugin_dir"
-    else
-      instance="${parts[0]:-}"
-      resource="${parts[1]:-}"
-      output_name="${parts[2]:-}"
-
-      if [[ -z "$instance" || -z "$resource" ]]; then
-        warn "Invalid batch line ${line_no}: $line"
-        continue
-      fi
-
-      resolve_dirs "$instance" "" ""
-      server_dir="$RESOLVED_SERVER_DIR"
-      plugin_dir="$RESOLVED_PLUGIN_DIR"
-    fi
-
-    if [[ -z "$resource" ]]; then
-      warn "Invalid batch line ${line_no}: $line"
-      continue
-    fi
-
-    run_download_safely "$instance" "$server_dir" "$plugin_dir" "$resource" "$output_name" "" "batch"
-    processed=$((processed + 1))
-  done < "$batch_file"
-
-  echo
-  echo "${C_GREEN}${C_BOLD}Batch complete.${C_RESET}"
-  echo "Processed entries: $processed"
-}
-
-parse_args() {
-  SPIGOTDL_ARG_INSTANCE=""
-  SPIGOTDL_ARG_SERVERS=""
-  SPIGOTDL_ARG_SERVER_DIR=""
-  SPIGOTDL_ARG_PLUGIN_DIR=""
-  SPIGOTDL_ARG_OUTPUT_NAME=""
-  SPIGOTDL_ARG_BATCH_FILE=""
-  SPIGOTDL_ARG_LIST="false"
-  SPIGOTDL_ARG_ALL="false"
-  SPIGOTDL_ARG_SCAN="false"
-  SPIGOTDL_ARG_UPDATE="false"
-  SPIGOTDL_DRY_RUN="${SPIGOTDL_DRY_RUN:-false}"
-  SPIGOTDL_ARG_RESOURCES=()
-
-  local positional=()
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      --version)
-        echo "spigotdl ${SPIGOTDL_VERSION}"
-        exit 0
-        ;;
-      --list)
-        SPIGOTDL_ARG_LIST="true"
-        shift
-        ;;
-      --no-color)
-        SPIGOTDL_COLOR="never"
-        shift
-        ;;
-      -y|--yes)
-        SPIGOTDL_YES="true"
-        shift
-        ;;
-      --dry-run)
-        SPIGOTDL_DRY_RUN="true"
-        shift
-        ;;
-      --scan)
-        SPIGOTDL_ARG_SCAN="true"
-        shift
-        ;;
-      --update)
-        SPIGOTDL_ARG_UPDATE="true"
-        shift
-        ;;
-      --all)
-        SPIGOTDL_ARG_ALL="true"
-        shift
-        ;;
-      -s|--server)
-        [[ $# -ge 2 ]] || die "--server requires a value"
-        SPIGOTDL_ARG_INSTANCE="$2"
-        shift 2
-        ;;
-      --server=*)
-        SPIGOTDL_ARG_INSTANCE="${1#*=}"
-        shift
-        ;;
-      --servers)
-        [[ $# -ge 2 ]] || die "--servers requires a comma-separated value"
-        SPIGOTDL_ARG_SERVERS="$2"
-        shift 2
-        ;;
-      --servers=*)
-        SPIGOTDL_ARG_SERVERS="${1#*=}"
-        shift
-        ;;
-      -r|--resource)
-        [[ $# -ge 2 ]] || die "--resource requires a value"
-        SPIGOTDL_ARG_RESOURCES+=("$2")
-        shift 2
-        ;;
-      --resource=*)
-        SPIGOTDL_ARG_RESOURCES+=("${1#*=}")
-        shift
-        ;;
-      -b|--batch)
-        [[ $# -ge 2 ]] || die "--batch requires a file"
-        SPIGOTDL_ARG_BATCH_FILE="$2"
-        shift 2
-        ;;
-      --batch=*)
-        SPIGOTDL_ARG_BATCH_FILE="${1#*=}"
-        shift
-        ;;
-      --server-dir)
-        [[ $# -ge 2 ]] || die "--server-dir requires a value"
-        SPIGOTDL_ARG_SERVER_DIR="$2"
-        shift 2
-        ;;
-      --server-dir=*)
-        SPIGOTDL_ARG_SERVER_DIR="${1#*=}"
-        shift
-        ;;
-      --plugin-dir|--plugins-dir)
-        [[ $# -ge 2 ]] || die "--plugin-dir requires a value"
-        SPIGOTDL_ARG_PLUGIN_DIR="$2"
-        shift 2
-        ;;
-      --plugin-dir=*|--plugins-dir=*)
-        SPIGOTDL_ARG_PLUGIN_DIR="${1#*=}"
-        shift
-        ;;
-      -d|--dir)
-        [[ $# -ge 2 ]] || die "--dir requires a value"
-        SPIGOTDL_ARG_SERVER_DIR="$2"
-        shift 2
-        ;;
-      --dir=*)
-        SPIGOTDL_ARG_SERVER_DIR="${1#*=}"
-        shift
-        ;;
-      -n|--name)
-        [[ $# -ge 2 ]] || die "--name requires a value"
-        SPIGOTDL_ARG_OUTPUT_NAME="$2"
-        shift 2
-        ;;
-      --name=*)
-        SPIGOTDL_ARG_OUTPUT_NAME="${1#*=}"
-        shift
-        ;;
-      --)
-        shift
-        while [[ $# -gt 0 ]]; do
-          positional+=("$1")
-          shift
-        done
-        ;;
-      -*)
-        die "Unknown option: $1"
-        ;;
-      *)
-        positional+=("$1")
-        shift
-        ;;
-    esac
-  done
-
-  if [[ "${#positional[@]}" -gt 0 ]]; then
-    if [[ -z "$SPIGOTDL_ARG_INSTANCE" && -z "$SPIGOTDL_ARG_SERVERS" && -z "$SPIGOTDL_ARG_SERVER_DIR" && -z "$SPIGOTDL_ARG_PLUGIN_DIR" ]]; then
-      SPIGOTDL_ARG_INSTANCE="${positional[0]}"
-      local i
-      for ((i=1; i<${#positional[@]}; i++)); do
-        SPIGOTDL_ARG_RESOURCES+=("${positional[$i]}")
-      done
-    else
-      local p
-      for p in "${positional[@]}"; do
-        SPIGOTDL_ARG_RESOURCES+=("$p")
-      done
-    fi
-  fi
-}
-
-build_target_list() {
-  TARGET_SERVERS=()
-
-  if truthy "$SPIGOTDL_ARG_ALL"; then
-    mapfile -t TARGET_SERVERS < <(list_instances)
-  elif [[ -n "$SPIGOTDL_ARG_SERVERS" ]]; then
-    mapfile -t TARGET_SERVERS < <(split_commas "$SPIGOTDL_ARG_SERVERS")
-  elif [[ -n "$SPIGOTDL_ARG_INSTANCE" ]]; then
-    TARGET_SERVERS+=("$SPIGOTDL_ARG_INSTANCE")
-  elif [[ -n "$SPIGOTDL_ARG_SERVER_DIR" || -n "$SPIGOTDL_ARG_PLUGIN_DIR" ]]; then
-    local guessed
-    guessed="$(basename "${SPIGOTDL_ARG_SERVER_DIR:-${SPIGOTDL_ARG_PLUGIN_DIR:-server}}")"
-    [[ "$guessed" == "$SPIGOTDL_PLUGINS_DIR_NAME" ]] && guessed="$(basename "$(dirname "$SPIGOTDL_ARG_PLUGIN_DIR")")"
-    TARGET_SERVERS+=("$guessed")
-  else
-    TARGET_SERVERS+=("$(choose_instance)")
-  fi
-
-  if [[ "${#TARGET_SERVERS[@]}" -eq 0 ]]; then
-    die "No target servers selected."
-  fi
-}
-
-main() {
-  parse_args "$@"
-  init_color
-
-  if truthy "$SPIGOTDL_ARG_LIST"; then
-    list_instances
-    exit 0
-  fi
-
-  need_cmd curl
-  need_cmd unzip
-  need_cmd python3
-  need_cmd awk
-  need_cmd sed
-  need_cmd grep
-  need_cmd stat
-  need_cmd find
-  need_cmd install
-  need_cmd mktemp
-  need_cmd head
-  need_cmd file
-  need_cmd wc
-  need_cmd tr
-
-  # A batch file without any target can specify one target per line:
-  #   server resource [filename]
-  if [[ -n "$SPIGOTDL_ARG_BATCH_FILE" && -z "$SPIGOTDL_ARG_INSTANCE" && -z "$SPIGOTDL_ARG_SERVERS" && -z "$SPIGOTDL_ARG_SERVER_DIR" && -z "$SPIGOTDL_ARG_PLUGIN_DIR" ]] && ! truthy "$SPIGOTDL_ARG_ALL"; then
-    process_batch_file "$SPIGOTDL_ARG_BATCH_FILE" "" "" ""
-    exit 0
-  fi
-
-  build_target_list
-
-  local instance server_dir plugin_dir
-  for instance in "${TARGET_SERVERS[@]}"; do
-    resolve_dirs "$instance" "$SPIGOTDL_ARG_SERVER_DIR" "$SPIGOTDL_ARG_PLUGIN_DIR"
-    server_dir="$RESOLVED_SERVER_DIR"
-    plugin_dir="$RESOLVED_PLUGIN_DIR"
-
-    if truthy "$SPIGOTDL_ARG_SCAN"; then
-      scan_server "$instance" "$server_dir" "$plugin_dir"
-    fi
-
-    if truthy "$SPIGOTDL_ARG_UPDATE"; then
-      update_server "$instance" "$server_dir" "$plugin_dir"
-    fi
-
-    if [[ -n "$SPIGOTDL_ARG_BATCH_FILE" ]]; then
-      process_batch_file "$SPIGOTDL_ARG_BATCH_FILE" "$instance" "$server_dir" "$plugin_dir"
-    fi
-
-    if [[ "${#SPIGOTDL_ARG_RESOURCES[@]}" -eq 0 && -z "$SPIGOTDL_ARG_BATCH_FILE" ]] && ! truthy "$SPIGOTDL_ARG_SCAN" && ! truthy "$SPIGOTDL_ARG_UPDATE"; then
-      local input
-      echo
-      read -rp "Spigot resource ID or link: " input
-      [[ -n "$input" ]] || die "No Spigot resource ID or link provided."
-      SPIGOTDL_ARG_RESOURCES+=("$input")
-    fi
-
-    local resource
-    for resource in "${SPIGOTDL_ARG_RESOURCES[@]}"; do
-      run_download_safely "$instance" "$server_dir" "$plugin_dir" "$resource" "$SPIGOTDL_ARG_OUTPUT_NAME" "" "manual"
-    done
-  done
-}
-
-main "$@"
+class Col:
+    reset=bold=dim=red=green=yellow=blue=cyan=gray=""
+
+def truthy(v): return str(v).strip().lower() in {"1","true","yes","y","on"}
+
+def parse_conf(path):
+    out={}
+    p=Path(path)
+    if not p.exists(): return out
+    for raw in p.read_text(errors="replace").splitlines():
+        line=raw.strip()
+        if not line or line.startswith("#"): continue
+        if line.startswith("export "): line=line[7:].strip()
+        if "=" not in line: continue
+        k,v=line.split("=",1); out[k.strip()]=v.strip().strip("'\"")
+    return out
+
+CFG=dict(DEFAULTS)
+CFG.update(parse_conf("/etc/spigotdl.conf"))
+CFG.update(parse_conf(Path.home()/".config/spigotdl/config"))
+for k in list(CFG):
+    if k in os.environ: CFG[k]=os.environ[k]
+
+# backwards-compatible env aliases
+for old,new in {"SPIGOTDL_COLOR":"SPDL_COLOR","SPIGOTDL_CONF_DIR":"SPDL_CONF_DIR","SPIGOTDL_SERVER_ROOTS":"SPDL_SERVER_ROOTS"}.items():
+    if old in os.environ: CFG[new]=os.environ[old]
+
+def init_color(no=False):
+    if no or os.environ.get("NO_COLOR") or CFG.get("SPDL_COLOR") == "never": return
+    if CFG.get("SPDL_COLOR") == "always" or (CFG.get("SPDL_COLOR") == "auto" and sys.stdout.isatty()):
+        Col.reset="\033[0m"; Col.bold="\033[1m"; Col.dim="\033[2m"; Col.red="\033[31m"; Col.green="\033[32m"; Col.yellow="\033[33m"; Col.blue="\033[34m"; Col.cyan="\033[36m"; Col.gray="\033[90m"
+
+def tag(t="SPDL"): return f"{Col.bold}{Col.blue}[{t}]{Col.reset}"
+def die(msg): print(f"{Col.red}{Col.bold}[ERROR]{Col.reset} {msg}", file=sys.stderr); sys.exit(1)
+def warn(msg): print(f"{Col.yellow}{Col.bold}[WARN]{Col.reset} {msg}", file=sys.stderr)
+def site(provider, s):
+    c={"spigot":Col.yellow,"modrinth":Col.green,"hangar":Col.cyan}.get(provider, "")
+    return f"{c}{s}{Col.reset}"
+def now(): return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+
+def brand():
+    print(f"{Col.yellow}" + r'''
+               =()=
+           ,/'\_||_
+           ( (___  `.
+           `\./  `=='
+                   |||
+                  |||
+     SP-DL        ||
+'''.rstrip() + f"{Col.reset}")
+    print(f"{tag()} sp-dl v{VERSION}\n")
+
+def http_json(url):
+    req=urllib.request.Request(url, headers={"User-Agent":CFG["SPDL_USER_AGENT"],"Accept":"application/json"})
+    with urllib.request.urlopen(req, timeout=35) as r: return json.loads(r.read().decode(r.headers.get_content_charset() or "utf-8", "replace"))
+
+def http_download(url, path):
+    req=urllib.request.Request(url, headers={"User-Agent":CFG["SPDL_USER_AGENT"]})
+    with urllib.request.urlopen(req, timeout=120) as r, open(path,"wb") as f: shutil.copyfileobj(r,f)
+
+def enc(s): return urllib.parse.quote(str(s), safe="")
+def safe_name(s):
+    s=re.sub(r"[^A-Za-z0-9._+-]+","-",str(s or "plugin")).strip("-")
+    return s if s.lower().endswith(".jar") else s+".jar"
+def validate_jar(p):
+    try:
+        with zipfile.ZipFile(p) as z: return z.testzip() is None
+    except Exception: return False
+
+def roots(): return [Path(x) for x in CFG["SPDL_SERVER_ROOTS"].split(":") if x]
+
+def server_dir_from_conf(name):
+    p=Path(CFG["SPDL_CONF_DIR"])/f"{name}.conf"
+    if not p.exists(): return None
+    key=CFG["SPDL_SERVER_DIR_VAR"]
+    for raw in p.read_text(errors="replace").splitlines():
+        line=raw.strip()
+        if line.startswith("export "): line=line[7:].strip()
+        if not line or line.startswith("#") or "=" not in line: continue
+        k,v=line.split("=",1)
+        if k.strip()==key: return Path(v.strip().strip("'\""))
+    return None
+
+def resolve_server(name="", server_dir="", plugin_dir=""):
+    if plugin_dir:
+        pd=Path(plugin_dir); return {"name":name or pd.parent.name,"server_dir":pd.parent,"plugin_dir":pd}
+    if server_dir:
+        sd=Path(server_dir); return {"name":name or sd.name,"server_dir":sd,"plugin_dir":sd/CFG["SPDL_PLUGINS_DIR_NAME"]}
+    conf=server_dir_from_conf(name)
+    if conf: return {"name":name,"server_dir":conf,"plugin_dir":conf/CFG["SPDL_PLUGINS_DIR_NAME"]}
+    for root in roots():
+        if (root/name).is_dir(): return {"name":name,"server_dir":root/name,"plugin_dir":root/name/CFG["SPDL_PLUGINS_DIR_NAME"]}
+    root=roots()[0] if roots() else Path("/opt/mc")
+    return {"name":name,"server_dir":root/name,"plugin_dir":root/name/CFG["SPDL_PLUGINS_DIR_NAME"]}
+
+def list_servers():
+    names=set(); ex=re.compile(CFG["SPDL_EXCLUDE_REGEX"])
+    cd=Path(CFG["SPDL_CONF_DIR"])
+    if cd.is_dir():
+        for p in cd.glob("*.conf"):
+            if not ex.search(p.stem): names.add(p.stem)
+    for root in roots():
+        if root.is_dir():
+            for p in root.iterdir():
+                if p.is_dir() and not ex.search(p.name): names.add(p.name)
+    return [resolve_server(n) for n in sorted(names)]
+
+def choose_server():
+    ss=list_servers()
+    if not ss:
+        n=input("Server name: ").strip(); return resolve_server(n)
+    print(f"{tag()} Servers")
+    for i,s in enumerate(ss,1): print(f"  {i}) {s['name']:<18} {Col.dim}{s['server_dir']}{Col.reset}")
+    c=input("Select server [number/name]: ").strip()
+    if c.isdigit() and 1 <= int(c) <= len(ss): return ss[int(c)-1]
+    return resolve_server(c)
+
+def ensure_server(s):
+    if not s["server_dir"].exists(): die(f"Server directory does not exist: {s['server_dir']}")
+    s["plugin_dir"].mkdir(parents=True, exist_ok=True)
+
+def reg_path(s): return s["plugin_dir"]/CFG["SPDL_REGISTRY_DIR"]/CFG["SPDL_REGISTRY_FILE"]
+def read_reg(s):
+    p=reg_path(s)
+    if not p.exists(): return []
+    with p.open(newline="", errors="replace") as f: return list(csv.DictReader(f, delimiter="\t"))
+def write_reg(s, rows):
+    p=reg_path(s); p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", newline="") as f:
+        w=csv.DictWriter(f, REG_COLS, delimiter="\t", extrasaction="ignore"); w.writeheader(); [w.writerow({c:r.get(c,"") for c in REG_COLS}) for r in rows]
+def migrate_reg(s):
+    p=reg_path(s)
+    if not p.exists(): return
+    first=p.read_text(errors="replace").splitlines()[:1]
+    if not first or first[0].split("\t")==REG_COLS: return
+    if "resource_id" not in first[0]: return
+    with p.open(newline="", errors="replace") as f: old=list(csv.DictReader(f, delimiter="\t"))
+    new=[]
+    for r in old:
+        new.append({"provider":"spigot","project_id":r.get("resource_id",""),"version_id":r.get("version_id",""),"filename":r.get("filename",""),"project_name":r.get("resource_name",""),"release_type":"release","loaders":"bukkit,spigot,paper","game_versions":"","installed_at":r.get("installed_at",now()),"source":"migrated"})
+    shutil.copy2(p, p.with_suffix(p.suffix+f".v1.bak.{int(time.time())}")); write_reg(s,new); warn(f"Migrated registry to v2: {p}")
+def upsert_reg(s,row):
+    rows=[r for r in read_reg(s) if not (r.get("provider")==row.get("provider") and r.get("project_id")==row.get("project_id"))]
+    rows.append(row); write_reg(s, rows)
+
+class Version:
+    def __init__(self, provider, project_id, version_id, name, release_type, loaders, versions, filename, url):
+        self.provider=provider; self.project_id=str(project_id); self.version_id=str(version_id or ""); self.name=name or str(project_id); self.release_type=release_type or ""; self.loaders=loaders or ""; self.versions=versions or ""; self.filename=safe_name(filename or self.name); self.url=url
+class Result:
+    def __init__(self, provider, project_id, name, desc="", downloads=0, stars=0, api="", versions="", rel=""):
+        self.provider=provider; self.project_id=str(project_id); self.name=name or str(project_id); self.desc=desc or ""; self.downloads=int(downloads or 0); self.stars=int(stars or 0); self.api=api or ""; self.versions=versions or ""; self.rel=rel or ""
+    def ref(self): return f"{self.provider}:{self.project_id}"
+
+class Spigot:
+    name="spigot"
+    def base(self): return CFG["SPDL_SPIGET_API"].rstrip("/")
+    def search(self,q,limit,sort,api="",mc="",rel=""):
+        sp_sort="-downloads" if sort in ("downloads","stars") else "-updateDate"
+        data=http_json(f"{self.base()}/search/resources/{enc(q)}?size={limit}&sort={enc(sp_sort)}")
+        out=[]
+        for x in data if isinstance(data,list) else []:
+            out.append(Result("spigot", x.get("id"), x.get("name"), re.sub("<.*?>","",str(x.get("tag") or x.get("description") or ""))[:160], x.get("downloads",0), x.get("likes",0), "bukkit,spigot,paper", "", "release"))
+        return out
+    def latest(self,pid,api="",mc="",rel=""):
+        m=http_json(f"{self.base()}/resources/{enc(pid)}"); name=m.get("name",f"spigot-{pid}"); f=m.get("file") or {}; v=m.get("version") or {}
+        return Version("spigot",pid,v.get("id") or m.get("updateDate"),name,"release","bukkit,spigot,paper",mc,f.get("name") or name,f"{self.base()}/resources/{enc(pid)}/download")
+class Modrinth:
+    name="modrinth"
+    def base(self): return CFG["SPDL_MODRINTH_API"].rstrip("/")
+    def loader(self,api): return {"paper":"paper","spigot":"spigot","bukkit":"bukkit","purpur":"purpur","velocity":"velocity","waterfall":"waterfall"}.get(api.lower(), api.lower())
+    def search(self,q,limit,sort,api="",mc="",rel=""):
+        idx={"downloads":"downloads","stars":"follows","updated":"updated","newest":"newest"}.get(sort,"relevance")
+        facets=[["project_type:mod"]]
+        if api: facets.append([f"categories:{self.loader(api)}"])
+        if mc: facets.append([f"versions:{mc}"])
+        params=urllib.parse.urlencode({"query":q,"limit":limit,"index":idx,"facets":json.dumps(facets,separators=(",",":"))})
+        data=http_json(f"{self.base()}/search?{params}"); out=[]
+        for x in data.get("hits",[]) if isinstance(data,dict) else []:
+            out.append(Result("modrinth", x.get("project_id") or x.get("slug"), x.get("title"), x.get("description","")[:160], x.get("downloads",0), x.get("follows",0), ",".join((x.get("categories") or [])[:8]), ",".join((x.get("versions") or [])[-5:]), rel))
+        return out
+    def versions(self,pid,api="",mc="",rel=""):
+        params={}
+        if api: params["loaders"]=json.dumps([self.loader(api)],separators=(",",":"))
+        if mc: params["game_versions"]=json.dumps([mc],separators=(",",":"))
+        url=f"{self.base()}/project/{enc(pid)}/version" + ("?"+urllib.parse.urlencode(params) if params else "")
+        vs=http_json(url); vs = vs if isinstance(vs,list) else []
+        if rel: vs=[v for v in vs if str(v.get("version_type","")).lower()==rel.lower()]
+        return vs
+    def latest(self,pid,api="",mc="",rel=""):
+        vs=self.versions(pid,api,mc,rel)
+        if not vs: raise RuntimeError(f"No Modrinth versions found for {pid}")
+        v=vs[0]; files=v.get("files") or []; f=next((x for x in files if x.get("primary")), files[0] if files else None)
+        if not f or not f.get("url"): raise RuntimeError(f"No downloadable file for {pid}")
+        return Version("modrinth",pid,v.get("id") or v.get("version_number"), v.get("name") or pid, v.get("version_type") or rel, ",".join(v.get("loaders") or []), ",".join(v.get("game_versions") or []), f.get("filename") or pid, f.get("url"))
+class Hangar:
+    name="hangar"
+    def base(self): return CFG["SPDL_HANGAR_API"].rstrip("/")
+    def platform(self,api): return "VELOCITY" if api.lower()=="velocity" else "WATERFALL" if api.lower()=="waterfall" else "PAPER"
+    def search(self,q,limit,sort,api="",mc="",rel=""):
+        plat=self.platform(api) if api else ""
+        urls=[]
+        for key in ("query","q"):
+            params={key:q,"pagination[limit]":str(limit),"pagination[offset]":"0"}
+            if plat: params["platform"]=plat
+            urls.append(f"{self.base()}/projects?{urllib.parse.urlencode(params)}")
+        data=None; err=None
+        for u in urls:
+            try: data=http_json(u); break
+            except Exception as e: err=e
+        if data is None: raise RuntimeError(err)
+        items=[]
+        if isinstance(data,list): items=data
+        elif isinstance(data,dict):
+            for k in ("result","results","projects","data"):
+                if isinstance(data.get(k),list): items=data[k]; break
+        out=[]
+        for x in items[:limit]:
+            if not isinstance(x,dict): continue
+            ns=x.get("namespace") or x.get("owner") or x.get("author") or ""; slug=x.get("slug") or x.get("name") or x.get("id") or ""
+            pid=x.get("pluginId") or x.get("projectId") or x.get("id") or (f"{ns}/{slug}" if ns else slug)
+            if isinstance(pid,dict): pid=pid.get("slug") or pid.get("name") or slug
+            stats=x.get("stats") or {}; out.append(Result("hangar",pid,x.get("name") or slug,str(x.get("description") or x.get("summary") or "")[:160],x.get("downloads") or stats.get("downloads") or 0,x.get("stars") or stats.get("stars") or 0,plat.lower() if plat else "paper,velocity,waterfall",mc,rel))
+        return out
+    def latest(self,pid,api="",mc="",rel=""):
+        channel={"release":"Release","beta":"Beta","snapshot":"Snapshot","alpha":"Alpha"}.get(rel.lower(),"Release") if rel else "Release"
+        eid="/".join(enc(x) for x in str(pid).split("/")); meta={}
+        for u in (f"{self.base()}/projects/{eid}/latest?channel={enc(channel)}", f"{self.base()}/projects/{eid}/versions/recommended"):
+            try: meta=http_json(u); break
+            except Exception: pass
+        name=str(pid).split("/")[-1]; ver=""; fname=name+".jar"
+        if isinstance(meta,dict):
+            ver=str(meta.get("name") or meta.get("version") or meta.get("id") or ""); name=str(meta.get("projectName") or meta.get("name") or name)
+            files=meta.get("files") or meta.get("downloads") or []
+            if isinstance(files,list):
+                for f in files:
+                    if isinstance(f,dict) and (f.get("filename") or f.get("fileName") or f.get("name")): fname=f.get("filename") or f.get("fileName") or f.get("name"); break
+        return Version("hangar",pid,ver,name,rel or "release",api or "paper",mc,fname,f"{self.base()}/projects/{eid}/versions/recommended/download")
+PROVIDERS={"spigot":Spigot(),"modrinth":Modrinth(),"hangar":Hangar()}
+
+def parse_ref(ref, default="spigot"):
+    if ":" in ref:
+        p,pid=ref.split(":",1)
+        if p in PROVIDERS: return p,pid
+    return default, ref
+
+def install_version(s,v,source="manual",name="",dry=False):
+    ensure_server(s); filename=safe_name(name or v.filename); dest=s["plugin_dir"]/filename
+    print(f"\n{tag()} Installing {site(v.provider,v.provider.upper())} {Col.bold}{v.name}{Col.reset}\n  Server : {s['name']}\n  Target : {dest}\n  Version: {v.version_id or 'unknown'}")
+    if dry: print(f"{Col.yellow}Dry run:{Col.reset} would download {v.url}"); return
+    tmp=Path(tempfile.mkstemp(prefix="spdl-", suffix=".jar")[1])
+    try:
+        print(f"{Col.blue}Downloading...{Col.reset}"); http_download(v.url,tmp)
+        if truthy(CFG["SPDL_VALIDATE_JAR"]):
+            print(f"{Col.blue}Validating jar...{Col.reset}")
+            if not validate_jar(tmp):
+                bad=tmp.with_suffix(".bad"); tmp.rename(bad); die(f"Downloaded file is not a valid jar. Saved bad file to {bad}")
+        if dest.exists() and truthy(CFG["SPDL_BACKUP_EXISTING"]):
+            bak=dest.with_name(dest.name+f".bak.{time.strftime('%Y%m%d-%H%M%S')}"); print(f"Backing up existing file: {bak}"); dest.rename(bak)
+        shutil.copy2(tmp,dest); os.chmod(dest, int(CFG["SPDL_INSTALL_MODE"],8))
+        if truthy(CFG["SPDL_AUTO_CHOWN"]):
+            try: st=s["plugin_dir"].stat(); os.chown(dest, st.st_uid, st.st_gid)
+            except Exception: pass
+        upsert_reg(s,{"provider":v.provider,"project_id":v.project_id,"version_id":v.version_id,"filename":filename,"project_name":v.name,"release_type":v.release_type,"loaders":v.loaders,"game_versions":v.versions,"installed_at":now(),"source":source})
+        print(f"\n{Col.green}{Col.bold}Done.{Col.reset}\n{Col.cyan}{Col.bold}Installed:{Col.reset}\n  {Col.green}{dest}{Col.reset}")
+        repl={"{instance}":s["name"],"{filename}":filename,"{dest}":str(dest),"{server_dir}":str(s["server_dir"]),"{plugin_dir}":str(s["plugin_dir"])}
+        for label,tpl in (("Restart command",CFG.get("SPDL_RESTART_CMD_TEMPLATE","")),("Optional live-load command",CFG.get("SPDL_PLUGMAN_CMD_TEMPLATE",""))):
+            if tpl:
+                for k,val in repl.items(): tpl=tpl.replace(k,val)
+                print(f"\n{Col.yellow}{Col.bold}{label}:{Col.reset}\n  {Col.blue}{tpl}{Col.reset}")
+    finally:
+        try: tmp.unlink()
+        except Exception: pass
+
+def install_ref(s, ref, api="", mc="", rel="", name="", source="manual", dry=False):
+    p,pid=parse_ref(ref, CFG["SPDL_DEFAULT_SOURCE"]); install_version(s, PROVIDERS[p].latest(pid,api,mc,rel), source, name, dry)
+
+def search_all(q, sources, limit, sort, api="", mc="", rel=""):
+    out=[]
+    for p in sources:
+        try: out += PROVIDERS[p].search(q,limit,sort,api,mc,rel)
+        except Exception as e: warn(f"{p} search failed: {e}")
+    return out
+
+def print_results(rs):
+    if not rs: print(f"{Col.yellow}No results found.{Col.reset}"); return
+    print(f"\n{tag()} Search Results")
+    for i,r in enumerate(rs,1):
+        print(f"{Col.bold}{i:>2}){Col.reset} {site(r.provider,'['+r.provider.upper()+']')} {Col.bold}{r.name}{Col.reset}")
+        print(f"     ID        : {r.ref()}")
+        if r.desc: print(f"     Summary   : {r.desc}")
+        print(f"     Downloads : {r.downloads}")
+        if r.stars: print(f"     Stars     : {r.stars}")
+        if r.api: print(f"     API/Loader: {r.api}")
+        if r.versions: print(f"     Versions  : {r.versions}")
+        if r.rel: print(f"     Release   : {r.rel}")
+
+def update_server(s,dry=False):
+    ensure_server(s); migrate_reg(s); rows=read_reg(s); checked=outdated=updated=failed=0
+    if not rows: warn(f"No registry for {s['name']}. Run: spigotdl scan --server {s['name']}"); return (0,0,0,0)
+    print(f"\n{tag()} Updating {s['name']}")
+    for r in rows:
+        p=PROVIDERS.get(r.get("provider"));
+        if not p: failed+=1; continue
+        checked+=1
+        try: v=p.latest(r.get("project_id",""),(r.get("loaders","").split(",")[0] if r.get("loaders") else ""),(r.get("game_versions","").split(",")[0] if r.get("game_versions") else ""),r.get("release_type",""))
+        except Exception as e: warn(f"Check failed for {r.get('project_name')}: {e}"); failed+=1; continue
+        if v.version_id and v.version_id==r.get("version_id"):
+            print(f"  {Col.green}OK{Col.reset} {r.get('project_name') or v.name} ({v.version_id})")
+        else:
+            outdated+=1; print(f"  {Col.yellow}UPDATE{Col.reset} {r.get('project_name') or v.name}: {r.get('version_id') or 'unknown'} -> {v.version_id or 'unknown'}")
+            if not dry: install_version(s,v,"update"); updated+=1
+    print(f"\n{tag()} Update summary: checked={checked} outdated={outdated} updated={updated} failed={failed}")
+    return checked,outdated,updated,failed
+
+def guess_name(jar):
+    n=Path(jar).stem; n=re.sub(r"[-_. ]+v?\d[\w.+-]*$","",n); return re.sub(r"[-_. ]+(bukkit|spigot|paper|velocity|waterfall|fabric|forge)$","",n,flags=re.I) or Path(jar).stem
+
+def scan_server(s,sources,yes=False,dry=False):
+    ensure_server(s); migrate_reg(s); tracked={r.get("filename") for r in read_reg(s)}; jars=sorted(list(s["plugin_dir"].glob("*.jar"))+list(s["plugin_dir"].glob("*.JAR")))
+    print(f"\n{tag()} Scanning {s['name']}\n  Plugin dir: {s['plugin_dir']}")
+    added=skipped=0
+    for jar in jars:
+        if jar.name in tracked: print(f"{Col.dim}tracked:{Col.reset} {jar.name}"); continue
+        q=guess_name(jar); print(f"\n{Col.cyan}{Col.bold}Untracked:{Col.reset} {jar.name} {Col.dim}(query: {q}){Col.reset}")
+        rs=search_all(q,sources,5,"relevance")
+        if not rs: skipped+=1; warn(f"No match for {jar.name}"); continue
+        if yes:
+            norm=lambda x: re.sub(r"[^a-z0-9]+","",x.lower())
+            sel=next((r for r in rs if norm(r.name)==norm(q)),None)
+            if not sel: skipped+=1; warn(f"No exact match for {jar.name}"); continue
+        else:
+            print_results(rs); c=input(f"Track which result for {jar.name}? [number/s]: ").strip()
+            if not c or c.lower().startswith("s") or not c.isdigit() or not (1<=int(c)<=len(rs)): skipped+=1; continue
+            sel=rs[int(c)-1]
+        if dry: print(f"{Col.yellow}Dry run:{Col.reset} would track {jar.name} as {sel.ref()}")
+        else:
+            try: v=PROVIDERS[sel.provider].latest(sel.project_id)
+            except Exception: v=Version(sel.provider,sel.project_id,"",sel.name,sel.rel,sel.api,sel.versions,jar.name,"")
+            upsert_reg(s,{"provider":sel.provider,"project_id":sel.project_id,"version_id":v.version_id,"filename":jar.name,"project_name":sel.name,"release_type":v.release_type,"loaders":v.loaders,"game_versions":v.versions,"installed_at":now(),"source":"scan"})
+            print(f"{Col.green}Tracked:{Col.reset} {jar.name} -> {sel.ref()}")
+        added+=1
+    print(f"\n{tag()} Scan summary: added={added} skipped={skipped} total_jars={len(jars)}")
+
+def overview(servers,check=True,details=False):
+    print(f"\n{tag()} Server Overview\n")
+    print(f"{Col.bold}{'Server':<18} {'Plugins':>7} {'Tracked':>7} {'Untracked':>9} {'Outdated':>8} {'Status':<13} Directory{Col.reset}")
+    reports=[]
+    for s in servers:
+        jars=list(s["plugin_dir"].glob("*.jar")) if s["plugin_dir"].exists() else []
+        if s["plugin_dir"].exists(): migrate_reg(s)
+        rows=read_reg(s) if s["plugin_dir"].exists() else []
+        out=fail=0; detail=[]
+        if check:
+            for r in rows:
+                p=PROVIDERS.get(r.get("provider"))
+                if not p: fail+=1; continue
+                try:
+                    v=p.latest(r.get("project_id",""),(r.get("loaders","").split(",")[0] if r.get("loaders") else ""),(r.get("game_versions","").split(",")[0] if r.get("game_versions") else ""),r.get("release_type",""))
+                    if v.version_id and v.version_id != r.get("version_id",""): out+=1; detail.append((r,v,"outdated"))
+                except Exception as e: fail+=1; detail.append((r,None,str(e)))
+        status="CHECK_FAILED" if fail else "UPDATE" if out else "UNTRACKED" if len(jars)>len(rows) else "OK"
+        color={"OK":Col.green,"UPDATE":Col.yellow,"UNTRACKED":Col.blue}.get(status,Col.red)
+        print(f"{s['name']:<18} {len(jars):>7} {len(rows):>7} {max(0,len(jars)-len(rows)):>9} {out:>8} {color}{status:<13}{Col.reset} {s['server_dir']}")
+        reports.append((s,detail))
+    if details:
+        for s,detail in reports:
+            if detail:
+                print(f"\n{Col.bold}{s['name']}{Col.reset}")
+                for r,v,reason in detail:
+                    if v: print(f"  {Col.yellow}UPDATE{Col.reset} {r.get('project_name')} [{r.get('provider')}] {r.get('version_id') or 'unknown'} -> {v.version_id or 'unknown'}")
+                    else: print(f"  {Col.red}CHECK_FAILED{Col.reset} {r.get('project_name')} [{r.get('provider')}] {reason}")
+
+def process_batch(file, default_s, args):
+    count=0
+    for no,raw in enumerate(Path(file).read_text(errors="replace").splitlines(),1):
+        line=raw.split("#",1)[0].strip()
+        if not line: continue
+        parts=line.split()
+        try:
+            if default_s:
+                s=default_s; ref=parts[0]; name=parts[1] if len(parts)>1 else ""
+            else:
+                if len(parts)<2: warn(f"Invalid batch line {no}: {raw}"); continue
+                s=resolve_server(parts[0]); ref=parts[1]; name=parts[2] if len(parts)>2 else ""
+            install_ref(s,ref,args.api,args.mc_version,args.release,name,"batch",args.dry_run); count+=1
+        except Exception as e:
+            warn(f"Batch line {no} failed: {e}")
+            if not truthy(CFG["SPDL_BATCH_CONTINUE_ON_ERROR"]): raise
+    print(f"\n{tag()} Batch complete. Processed entries: {count}")
+
+def menu():
+    brand()
+    while True:
+        print(f"{tag()} Main Menu\n  1) Search plugins\n  2) Install by ID / URL / provider ref\n  3) Batch install\n  4) Scan installed plugins\n  5) Update tracked plugins\n  6) Server overview\n  7) List servers\n  0) Exit\n")
+        c=input("Select: ").strip()
+        if c=="0": return
+        if c=="1":
+            q=input("Search query: ").strip(); src=input("Source [all/spigot/modrinth/hangar] (all): ").strip() or "all"; rs=search_all(q, list(PROVIDERS) if src=="all" else [src], int(CFG["SPDL_SEARCH_LIMIT"]), "relevance"); print_results(rs)
+        elif c=="2": install_ref(choose_server(), input("Resource ID / URL / provider ref: ").strip())
+        elif c=="3": process_batch(input("Batch file: ").strip(), choose_server(), argparse.Namespace(api="",mc_version="",release="",dry_run=False))
+        elif c=="4": scan_server(choose_server(), list(PROVIDERS))
+        elif c=="5": update_server(choose_server())
+        elif c=="6": overview(list_servers(), True, True)
+        elif c=="7": [print(f"{s['name']}\t{s['server_dir']}\t{s['plugin_dir']}") for s in list_servers()]
+        else: warn("Invalid choice")
+
+def targets(args):
+    if getattr(args,"all",False): return list_servers()
+    if getattr(args,"servers",""): return [resolve_server(x.strip()) for x in args.servers.split(",") if x.strip()]
+    if getattr(args,"server","") or getattr(args,"server_dir","") or getattr(args,"plugin_dir",""): return [resolve_server(getattr(args,"server",""), getattr(args,"server_dir",""), getattr(args,"plugin_dir",""))]
+    return [choose_server()]
+
+def build_parser():
+    p=argparse.ArgumentParser(prog="spigotdl", description="SP-DL Minecraft plugin downloader/updater")
+    p.add_argument("--version", action="store_true"); p.add_argument("--no-color", action="store_true")
+    sub=p.add_subparsers(dest="cmd")
+    sub.add_parser("menu"); sub.add_parser("list")
+    s=sub.add_parser("search"); s.add_argument("query", nargs="+"); s.add_argument("--source", choices=["spigot","modrinth","hangar","all"], default="all"); s.add_argument("--api", default=""); s.add_argument("--mc-version","--version",dest="mc_version",default=""); s.add_argument("--release", choices=["release","beta","alpha","snapshot"], default=""); s.add_argument("--sort", choices=["relevance","downloads","stars","updated","newest"], default="relevance"); s.add_argument("--limit", type=int, default=10); s.add_argument("--server", default=""); s.add_argument("--server-dir", default=""); s.add_argument("--plugin-dir", default=""); s.add_argument("--install", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    i=sub.add_parser("install"); i.add_argument("refs", nargs="+"); i.add_argument("--server","-s",default=""); i.add_argument("--server-dir",default=""); i.add_argument("--plugin-dir",default=""); i.add_argument("--api",default=""); i.add_argument("--mc-version","--version",dest="mc_version",default=""); i.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); i.add_argument("--name","-n",default=""); i.add_argument("--dry-run",action="store_true")
+    b=sub.add_parser("batch"); b.add_argument("file"); b.add_argument("--server","-s",default=""); b.add_argument("--server-dir",default=""); b.add_argument("--plugin-dir",default=""); b.add_argument("--api",default=""); b.add_argument("--mc-version","--version",dest="mc_version",default=""); b.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); b.add_argument("--dry-run",action="store_true")
+    sc=sub.add_parser("scan"); sc.add_argument("--server","-s",default=""); sc.add_argument("--server-dir",default=""); sc.add_argument("--plugin-dir",default=""); sc.add_argument("--source",choices=["spigot","modrinth","hangar","all"],default="all"); sc.add_argument("--yes","-y",action="store_true"); sc.add_argument("--dry-run",action="store_true")
+    u=sub.add_parser("update"); u.add_argument("--server","-s",default=""); u.add_argument("--servers",default=""); u.add_argument("--all",action="store_true"); u.add_argument("--server-dir",default=""); u.add_argument("--plugin-dir",default=""); u.add_argument("--dry-run",action="store_true")
+    o=sub.add_parser("overview"); o.add_argument("--server","-s",default=""); o.add_argument("--servers",default=""); o.add_argument("--all",action="store_true"); o.add_argument("--server-dir",default=""); o.add_argument("--plugin-dir",default=""); o.add_argument("--no-check",action="store_true"); o.add_argument("--details",action="store_true")
+    return p
+
+def legacy(argv):
+    if argv and not argv[0].startswith("-") and argv[0] not in {"menu","search","install","batch","scan","update","overview","list"} and len(argv)>=2:
+        return argparse.Namespace(cmd="install",refs=argv[1:],server=argv[0],server_dir="",plugin_dir="",api="",mc_version="",release="",name="",dry_run=False)
+    return None
+
+def main(argv=None):
+    argv=list(sys.argv[1:] if argv is None else argv); init_color("--no-color" in argv)
+    if not argv: menu(); return
+    args=legacy(argv) or build_parser().parse_args(argv)
+    if getattr(args,"version",False): print(f"spigotdl {VERSION}"); return
+    if args.cmd=="menu": menu(); return
+    if args.cmd=="list": [print(f"{s['name']}\t{s['server_dir']}\t{s['plugin_dir']}") for s in list_servers()]; return
+    if args.cmd=="search":
+        brand(); src=list(PROVIDERS) if args.source=="all" else [args.source]; rs=search_all(" ".join(args.query),src,args.limit,args.sort,args.api,args.mc_version,args.release); print_results(rs)
+        if rs and (args.server or args.server_dir or args.plugin_dir):
+            c="1" if args.install else input("Install which result? [number/s]: ").strip()
+            if c.isdigit() and 1<=int(c)<=len(rs): install_ref(resolve_server(args.server,args.server_dir,args.plugin_dir),rs[int(c)-1].ref(),args.api,args.mc_version,args.release,"","search",args.dry_run)
+        return
+    if args.cmd=="install":
+        for s in targets(args):
+            for ref in args.refs: install_ref(s,ref,args.api,args.mc_version,args.release,args.name,"manual",args.dry_run)
+        return
+    if args.cmd=="batch": process_batch(args.file, targets(args)[0] if (args.server or args.server_dir or args.plugin_dir) else None, args); return
+    if args.cmd=="scan":
+        src=list(PROVIDERS) if args.source=="all" else [args.source]
+        for s in targets(args): scan_server(s,src,args.yes,args.dry_run)
+        return
+    if args.cmd=="update":
+        for s in targets(args): update_server(s,args.dry_run)
+        return
+    if args.cmd=="overview":
+        ss=targets(args) if (args.server or args.servers or args.all or args.server_dir or args.plugin_dir) else list_servers(); overview(ss, not args.no_check, args.details); return
+    menu()
+if __name__=="__main__":
+    try: main()
+    except KeyboardInterrupt: print(); die("Interrupted")

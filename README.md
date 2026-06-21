@@ -36,11 +36,11 @@ spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
   Supports custom server roots, config directories, plugin folder names, and direct `--server-dir` or `--plugin-dir` paths for non-standard setups.
 
 - **Configurable behavior**  
-  Supports system-wide config, per-user config, environment-variable overrides, and optional post-install restart or PlugMan command suggestions.
+  Supports system-wide config, per-user config, environment-variable overrides, and optional command suggestions.
 
 ## Requirements
 
-- 5 minutes and
+- 5 minutes
 - A working Linux server
 - Standard CLI tools: `curl`, `unzip`, `python3`, `find`, `file`, and GNU/coreutils tools.
 - Minnecraft server(s) running on bare-metal or of which the files can be accessed directly via CLI
@@ -131,15 +131,10 @@ List detected servers:
 spigotdl --list
 ```
 
-Disable color:
-
-```bash
-spigotdl --no-color survival 19254
-```
 
 ## Batch downloading
 
-You can download multiple plugins in one command:
+Download multiple plugins in one command:
 
 ```bash
 spigotdl survival 19254 34315 6245

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# V1.3.0 Major refactor - Enjoy the project :)
 import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
 DEFAULTS = {
     "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
@@ -26,6 +25,24 @@ class Col:
 
 def truthy(v): return str(v).strip().lower() in {"1","true","yes","y","on"}
 
+def strip_inline_comment(value):
+    # Remove comments outside quotes, allowing config like:
+    # SPDL_DEFAULT_SOURCE="spigot" # DEFAULT: spigot
+    out=[]; quote=None; esc=False
+    for ch in value:
+        if esc:
+            out.append(ch); esc=False; continue
+        if ch == "\\":
+            out.append(ch); esc=True; continue
+        if ch in ("'", '"'):
+            if quote is None: quote=ch
+            elif quote == ch: quote=None
+            out.append(ch); continue
+        if ch == "#" and quote is None:
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
 def parse_conf(path):
     out={}
     p=Path(path)
@@ -35,7 +52,11 @@ def parse_conf(path):
         if not line or line.startswith("#"): continue
         if line.startswith("export "): line=line[7:].strip()
         if "=" not in line: continue
-        k,v=line.split("=",1); out[k.strip()]=v.strip().strip("'\"")
+        k,v=line.split("=",1)
+        k=k.strip(); v=strip_inline_comment(v.strip())
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v=v[1:-1]
+        if k: out[k]=v
     return out
 
 CFG=dict(DEFAULTS)
@@ -47,6 +68,7 @@ for k in list(CFG):
 # backwards-compatible env aliases
 for old,new in {"SPIGOTDL_COLOR":"SPDL_COLOR","SPIGOTDL_CONF_DIR":"SPDL_CONF_DIR","SPIGOTDL_SERVER_ROOTS":"SPDL_SERVER_ROOTS"}.items():
     if old in os.environ: CFG[new]=os.environ[old]
+CFG["SPDL_DEFAULT_SOURCE"] = str(CFG.get("SPDL_DEFAULT_SOURCE", "spigot")).strip().lower()
 
 def init_color(no=False):
     if no or os.environ.get("NO_COLOR") or CFG.get("SPDL_COLOR") == "never": return
@@ -260,10 +282,32 @@ class Hangar:
         return Version("hangar",pid,ver,name,rel or "release",api or "paper",mc,fname,f"{self.base()}/projects/{eid}/versions/recommended/download")
 PROVIDERS={"spigot":Spigot(),"modrinth":Modrinth(),"hangar":Hangar()}
 
+def spigot_id(ref):
+    ref=str(ref).strip(); clean=ref.split("?",1)[0].split("#",1)[0]
+    if clean.isdigit(): return clean
+    m=re.search(r"resources/[^/]*\.([0-9]+)", clean, re.I)
+    if m: return m.group(1)
+    nums=re.findall(r"[0-9]+", clean)
+    return nums[-1] if nums else ref
+
 def parse_ref(ref, default="spigot"):
+    ref=str(ref).strip(); default=str(default or "spigot").strip().lower()
+    if default not in PROVIDERS:
+        die(f"Invalid SPDL_DEFAULT_SOURCE={default!r}. Valid options: {', '.join(PROVIDERS)}")
+    if re.search(r"spigotmc\.org/resources/", ref, re.I):
+        return "spigot", spigot_id(ref)
+    if re.search(r"modrinth\.com/(plugin|mod)/", ref, re.I):
+        clean=ref.split("?",1)[0].split("#",1)[0].rstrip("/")
+        return "modrinth", clean.rsplit("/",1)[-1]
+    if re.search(r"hangar\.papermc\.io/", ref, re.I):
+        clean=ref.split("?",1)[0].split("#",1)[0].rstrip("/")
+        parts=clean.split("/")
+        if len(parts) >= 2: return "hangar", "/".join(parts[-2:])
     if ":" in ref:
-        p,pid=ref.split(":",1)
-        if p in PROVIDERS: return p,pid
+        p,pid=ref.split(":",1); p=p.strip().lower()
+        if p in PROVIDERS: return p,pid.strip()
+    if default == "spigot":
+        return "spigot", spigot_id(ref)
     return default, ref
 
 def install_version(s,v,source="manual",name="",dry=False):

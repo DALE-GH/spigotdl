@@ -15,7 +15,7 @@ Example:
 spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
 ```
 
-_**INDEX -** `[FEATURES](https://github.com/DALE-GH/spigotdl#features) / [REQUIREMENTS](https://github.com/DALE-GH/spigotdl#requirements) / [](https://github.com/DALE-GH/spigotdl#install) ()`_
+_**INDEX -** [FEATURES](https://github.com/DALE-GH/spigotdl#features) / [REQUIREMENTS](https://github.com/DALE-GH/spigotdl#requirements) / [](https://github.com/DALE-GH/spigotdl#install) ()_
 
 ## Features
 

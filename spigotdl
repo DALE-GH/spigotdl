@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPIGOTDL_VERSION="1.0.0"
+SPIGOTDL_VERSION="1.2.0"
 
 # -------------------------------------------------------------------
-# Config loading
-# -------------------------------------------------------------------
-# Defaults can be overridden by:
-#   1. /etc/spigotdl.conf
-#   2. ~/.config/spigotdl/config
-#   3. Environment variables
+# spigotdl
+# Download free Spigot plugin jars from a terminal.
 #
-# Example:
-#   SPIGOTDL_MC_ROOT="/opt/mc"
-#   SPIGOTDL_CONF_DIR="/etc/mc"
-#   SPIGOTDL_FILENAME_MODE="file"
+# Config precedence:
+#   1. Built-in defaults
+#   2. /etc/spigotdl.conf
+#   3. ~/.config/spigotdl/config
+#   4. CLI flags / environment variables
 # -------------------------------------------------------------------
 
 load_config_file() {
@@ -31,15 +28,14 @@ if [[ -n "${HOME:-}" ]]; then
 fi
 
 SPIGOTDL_API_URL="${SPIGOTDL_API_URL:-https://api.spiget.org/v2}"
-SPIGOTDL_MC_ROOT="${SPIGOTDL_MC_ROOT:-/opt/mc}"
+SPIGOTDL_SERVER_ROOTS="${SPIGOTDL_SERVER_ROOTS:-${SPIGOTDL_MC_ROOT:-/opt/mc}}"
 SPIGOTDL_CONF_DIR="${SPIGOTDL_CONF_DIR:-/etc/mc}"
 SPIGOTDL_SERVER_DIR_VAR="${SPIGOTDL_SERVER_DIR_VAR:-SERVER_DIR}"
-
-# Hidden dirs and non-server utility dirs are excluded from the interactive menu.
-SPIGOTDL_EXCLUDE_REGEX="${SPIGOTDL_EXCLUDE_REGEX:-(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$)}"
+SPIGOTDL_PLUGINS_DIR_NAME="${SPIGOTDL_PLUGINS_DIR_NAME:-plugins}"
+SPIGOTDL_EXCLUDE_REGEX="${SPIGOTDL_EXCLUDE_REGEX:-(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$|^tmp$|^temp$)}"
 
 # Filename modes:
-#   file       = prefer original uploaded .jar filename from Spiget metadata
+#   file       = prefer original uploaded .jar filename from metadata
 #   resource   = use Spigot resource/plugin name
 #   resourceid = use resource-name-resource-id.jar
 SPIGOTDL_FILENAME_MODE="${SPIGOTDL_FILENAME_MODE:-file}"
@@ -51,15 +47,25 @@ SPIGOTDL_YES="${SPIGOTDL_YES:-false}"
 SPIGOTDL_COLOR="${SPIGOTDL_COLOR:-auto}"
 SPIGOTDL_INSTALL_MODE="${SPIGOTDL_INSTALL_MODE:-0644}"
 SPIGOTDL_USER_AGENT="${SPIGOTDL_USER_AGENT:-Mozilla/5.0 spigotdl/${SPIGOTDL_VERSION}}"
+SPIGOTDL_BATCH_CONTINUE_ON_ERROR="${SPIGOTDL_BATCH_CONTINUE_ON_ERROR:-true}"
 
-# Output command templates.
+# Registry used by --update. Stored inside each plugins folder by default.
+SPIGOTDL_REGISTRY_DIR_NAME="${SPIGOTDL_REGISTRY_DIR_NAME:-.spigotdl}"
+SPIGOTDL_REGISTRY_FILE_NAME="${SPIGOTDL_REGISTRY_FILE_NAME:-registry.tsv}"
+
+# Scan behavior. --scan can build registry entries from existing jars.
+SPIGOTDL_SCAN_MAX_RESULTS="${SPIGOTDL_SCAN_MAX_RESULTS:-5}"
+SPIGOTDL_SCAN_AUTO_EXACT="${SPIGOTDL_SCAN_AUTO_EXACT:-true}"
+
+# Optional command suggestions printed after install.
+# Set either to an empty string to hide it.
 # Available placeholders:
 #   {instance}
 #   {filename}
 #   {dest}
 #   {server_dir}
 #   {plugin_dir}
-SPIGOTDL_RESTART_CMD_TEMPLATE="${SPIGOTDL_RESTART_CMD_TEMPLATE:-sudo systemctl restart mc@{instance}}"
+SPIGOTDL_RESTART_CMD_TEMPLATE="${SPIGOTDL_RESTART_CMD_TEMPLATE:-}"
 SPIGOTDL_PLUGMAN_CMD_TEMPLATE="${SPIGOTDL_PLUGMAN_CMD_TEMPLATE:-plugman load {filename}}"
 
 C_RESET=""
@@ -69,6 +75,7 @@ C_GREEN=""
 C_YELLOW=""
 C_BLUE=""
 C_CYAN=""
+C_DIM=""
 
 init_color() {
   if [[ "${SPIGOTDL_COLOR}" == "never" || -n "${NO_COLOR:-}" ]]; then
@@ -83,6 +90,7 @@ init_color() {
     C_YELLOW=$'\033[33m'
     C_BLUE=$'\033[34m'
     C_CYAN=$'\033[36m'
+    C_DIM=$'\033[2m'
   fi
 }
 
@@ -95,14 +103,6 @@ warn() {
   echo "${C_YELLOW}${C_BOLD}WARNING:${C_RESET} $*" >&2
 }
 
-info() {
-  echo "${C_CYAN}${C_BOLD}$*${C_RESET}"
-}
-
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
-}
-
 truthy() {
   case "${1:-}" in
     1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On) return 0 ;;
@@ -110,46 +110,71 @@ truthy() {
   esac
 }
 
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
 usage() {
   cat <<'HELP'
-spigotdl - Download Spigot plugin jars from the CLI
+spigotdl - Download and update free Spigot plugin jars from the CLI
 
 Usage:
   spigotdl
-  spigotdl <server> <spigot-resource-id-or-link>
+  spigotdl <server> <resource...>
   spigotdl --server <server> --resource <id-or-link>
+  spigotdl --server <server> --batch plugins.txt
+  spigotdl --server <server> --update
+  spigotdl --server <server> --scan
+  spigotdl --server <server> --scan --update
+  spigotdl --servers survival,lobby --update
+  spigotdl --all --update
+  spigotdl --server-dir <path> --resource <id-or-link>
+  spigotdl --plugin-dir <path> --resource <id-or-link>
   spigotdl --list
-  spigotdl --help
 
 Examples:
-  spigotdl
-  spigotdl smp 19254
-  spigotdl smp https://www.spigotmc.org/resources/viaversion.19254/
-  spigotdl --server smp --resource 19254 --yes
-  spigotdl --server smp --resource 19254 --name ViaVersion.jar
+  spigotdl survival 19254
+  spigotdl survival 19254 34315 6245
+  spigotdl --server survival --resource 19254 --resource 34315
+  spigotdl --server survival --batch plugins.txt
+  spigotdl --batch fleet-plugins.txt
+  spigotdl --server survival --scan
+  spigotdl --server survival --update
+  spigotdl --servers survival,lobby --scan --update --yes
+  spigotdl --all --update --dry-run
 
 Options:
-  -s, --server NAME       Server instance name, example: smp
-  -r, --resource VALUE    Spigot resource ID or full Spigot resource URL
-  -d, --dir PATH          Direct server directory override
-  -n, --name FILE.jar     Override output filename
-  -y, --yes               Do not prompt for external download confirmation
-      --list              List detected server instances
-      --no-color          Disable color output
-      --version           Show version
-  -h, --help              Show help
+  -s, --server NAME        Server instance name
+      --servers A,B,C      Comma-separated server instance list
+      --all                Use all detected servers for --scan/--update
+  -r, --resource VALUE     Spigot resource ID or full Spigot resource URL. May be repeated.
+  -b, --batch FILE         Batch file. May be used with --server or contain server names.
+      --scan               Scan existing jars and add matches to the local registry
+      --update             Update plugins listed in the local registry
+      --dry-run            Show what would happen without downloading or changing files
+      --server-dir PATH    Direct server directory override
+      --plugin-dir PATH    Direct plugins directory override
+  -n, --name FILE.jar      Override output filename for a single resource
+  -y, --yes                Do not prompt for external downloads or scan matches
+      --list               List detected server instances
+      --no-color           Disable color output
+      --version            Show version
+  -h, --help               Show help
+
+Batch file formats:
+  With --server:
+    19254
+    https://www.spigotmc.org/resources/viaversion.19254/
+    19254 ViaVersion.jar
+
+  Without --server:
+    survival 19254
+    lobby https://www.spigotmc.org/resources/viaversion.19254/
+    survival 19254 ViaVersion.jar
 
 Config files:
   /etc/spigotdl.conf
   ~/.config/spigotdl/config
-
-Important config variables:
-  SPIGOTDL_MC_ROOT="/opt/mc"
-  SPIGOTDL_CONF_DIR="/etc/mc"
-  SPIGOTDL_EXCLUDE_REGEX='(^$|^\..*|^backups?$|^backup$|^cache$)'
-  SPIGOTDL_FILENAME_MODE="file"
-  SPIGOTDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
-  SPIGOTDL_RESTART_CMD_TEMPLATE='sudo systemctl restart mc@{instance}'
 HELP
 }
 
@@ -183,6 +208,14 @@ print(value)
 ' "$key"
 }
 
+urlencode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+normalize_text() {
+  python3 -c 'import re, sys; print(re.sub(r"[^a-z0-9]+", "", sys.argv[1].lower()))' "$1"
+}
+
 safe_filename() {
   local name="$1"
 
@@ -192,6 +225,21 @@ safe_filename() {
 
   printf '%s\n' "$name" \
     | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//'
+}
+
+guess_resource_query() {
+  local file="$1"
+  local base
+  base="$(basename "$file")"
+  base="${base%.jar}"
+  base="${base%.JAR}"
+
+  # Strip common trailing version suffixes, such as:
+  # ViaVersion-5.4.2 -> ViaVersion
+  # EssentialsX-2.21.0-dev -> EssentialsX
+  printf '%s\n' "$base" \
+    | sed -E 's/[-_ .]+v?[0-9][A-Za-z0-9._+-]*$//' \
+    | sed -E 's/[-_ .]+(bukkit|spigot|paper)$//I'
 }
 
 extract_resource_id() {
@@ -221,10 +269,24 @@ extract_resource_id() {
   return 1
 }
 
+split_roots() {
+  tr ':' '\n' <<<"$SPIGOTDL_SERVER_ROOTS" | sed '/^[[:space:]]*$/d'
+}
+
+split_commas() {
+  tr ',' '\n' <<<"$1" | sed '/^[[:space:]]*$/d'
+}
+
 list_instances() {
   {
-    find "$SPIGOTDL_CONF_DIR" -maxdepth 1 -type f -name "*.conf" -printf "%f\n" 2>/dev/null | sed 's/\.conf$//'
-    find "$SPIGOTDL_MC_ROOT" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null
+    if [[ -d "$SPIGOTDL_CONF_DIR" ]]; then
+      find "$SPIGOTDL_CONF_DIR" -maxdepth 1 -type f -name "*.conf" -printf "%f\n" 2>/dev/null | sed 's/\.conf$//'
+    fi
+
+    while IFS= read -r root; do
+      [[ -d "$root" ]] || continue
+      find "$root" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null
+    done < <(split_roots)
   } | grep -Ev "$SPIGOTDL_EXCLUDE_REGEX" | sort -u
 }
 
@@ -249,9 +311,18 @@ server_dir_from_instance() {
 
   if [[ -n "$dir" ]]; then
     printf '%s\n' "$dir"
-  else
-    printf '%s/%s\n' "$SPIGOTDL_MC_ROOT" "$instance"
+    return 0
   fi
+
+  while IFS= read -r root; do
+    [[ -d "${root}/${instance}" ]] || continue
+    printf '%s\n' "${root}/${instance}"
+    return 0
+  done < <(split_roots)
+
+  local first_root
+  first_root="$(split_roots | head -n 1)"
+  printf '%s/%s\n' "${first_root:-/opt/mc}" "$instance"
 }
 
 choose_instance() {
@@ -259,14 +330,15 @@ choose_instance() {
   mapfile -t instances < <(list_instances)
 
   if [[ "${#instances[@]}" -eq 0 ]]; then
-    echo "No valid instances found in ${SPIGOTDL_CONF_DIR}/*.conf or ${SPIGOTDL_MC_ROOT}/*" >&2
-    read -rp "Type server instance name manually, example smp: " manual
+    echo "No server instances were auto-detected." >&2
+    echo "Configure SPIGOTDL_SERVER_ROOTS, create ${SPIGOTDL_CONF_DIR}/<server>.conf, or use --server-dir/--plugin-dir." >&2
+    read -rp "Type server instance name manually: " manual
     [[ -n "$manual" ]] || die "No server instance provided."
     echo "$manual"
     return 0
   fi
 
-  echo "Available Minecraft instances:" >&2
+  echo "Available Minecraft servers:" >&2
 
   local i
   for i in "${!instances[@]}"; do
@@ -286,6 +358,26 @@ choose_instance() {
   fi
 }
 
+resolve_dirs() {
+  local instance="$1"
+  local server_dir_arg="$2"
+  local plugin_dir_arg="$3"
+
+  if [[ -n "$plugin_dir_arg" ]]; then
+    RESOLVED_PLUGIN_DIR="$plugin_dir_arg"
+    RESOLVED_SERVER_DIR="$(dirname "$plugin_dir_arg")"
+  elif [[ -n "$server_dir_arg" ]]; then
+    RESOLVED_SERVER_DIR="$server_dir_arg"
+    RESOLVED_PLUGIN_DIR="${RESOLVED_SERVER_DIR}/${SPIGOTDL_PLUGINS_DIR_NAME}"
+  else
+    RESOLVED_SERVER_DIR="$(server_dir_from_instance "$instance")"
+    RESOLVED_PLUGIN_DIR="${RESOLVED_SERVER_DIR}/${SPIGOTDL_PLUGINS_DIR_NAME}"
+  fi
+
+  [[ -d "$RESOLVED_SERVER_DIR" ]] || die "Server directory does not exist: $RESOLVED_SERVER_DIR"
+  mkdir -p "$RESOLVED_PLUGIN_DIR" 2>/dev/null || die "Cannot create or access plugin directory: $RESOLVED_PLUGIN_DIR"
+}
+
 render_template() {
   local template="$1"
   local instance="$2"
@@ -301,6 +393,75 @@ render_template() {
   template="${template//\{plugin_dir\}/$plugin_dir}"
 
   printf '%s\n' "$template"
+}
+
+registry_path() {
+  local plugin_dir="$1"
+  printf '%s/%s/%s\n' "$plugin_dir" "$SPIGOTDL_REGISTRY_DIR_NAME" "$SPIGOTDL_REGISTRY_FILE_NAME"
+}
+
+ensure_registry() {
+  local plugin_dir="$1"
+  local registry
+  registry="$(registry_path "$plugin_dir")"
+
+  mkdir -p "$(dirname "$registry")"
+
+  if [[ ! -f "$registry" ]]; then
+    printf 'resource_id\tfilename\tresource_name\tversion_id\tinstalled_at\tsource\n' > "$registry"
+  fi
+}
+
+tsv_clean() {
+  printf '%s' "${1:-}" | tr '\t\r\n' '   '
+}
+
+registry_has_resource() {
+  local plugin_dir="$1"
+  local resource_id="$2"
+  local registry
+  registry="$(registry_path "$plugin_dir")"
+
+  [[ -f "$registry" ]] || return 1
+  awk -F'\t' -v id="$resource_id" 'NR > 1 && $1 == id { found=1 } END { exit !found }' "$registry"
+}
+
+registry_has_filename() {
+  local plugin_dir="$1"
+  local filename="$2"
+  local registry
+  registry="$(registry_path "$plugin_dir")"
+
+  [[ -f "$registry" ]] || return 1
+  awk -F'\t' -v name="$filename" 'NR > 1 && $2 == name { found=1 } END { exit !found }' "$registry"
+}
+
+registry_upsert() {
+  local plugin_dir="$1"
+  local resource_id="$2"
+  local filename="$3"
+  local resource_name="$4"
+  local version_id="$5"
+  local source="$6"
+
+  ensure_registry "$plugin_dir"
+
+  local registry tmp installed_at
+  registry="$(registry_path "$plugin_dir")"
+  tmp="$(mktemp)"
+  installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  awk -F'\t' -v id="$resource_id" 'NR == 1 || $1 != id' "$registry" > "$tmp" || true
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(tsv_clean "$resource_id")" \
+    "$(tsv_clean "$filename")" \
+    "$(tsv_clean "$resource_name")" \
+    "$(tsv_clean "$version_id")" \
+    "$(tsv_clean "$installed_at")" \
+    "$(tsv_clean "$source")" >> "$tmp"
+
+  mv "$tmp" "$registry"
 }
 
 make_output_name() {
@@ -341,12 +502,479 @@ make_output_name() {
   fi
 }
 
+fetch_metadata() {
+  local resource_id="$1"
+  curl -fsSL "${SPIGOTDL_API_URL}/resources/${resource_id}"
+}
+
+download_resource() {
+  local instance="$1"
+  local server_dir="$2"
+  local plugin_dir="$3"
+  local input="$4"
+  local output_override="${5:-}"
+  local old_filename="${6:-}"
+  local source="${7:-manual}"
+
+  local resource_id
+  resource_id="$(extract_resource_id "$input")" || die "Could not extract a resource ID from: $input"
+
+  echo
+  echo "${C_CYAN}${C_BOLD}Server          :${C_RESET} $instance"
+  echo "${C_CYAN}${C_BOLD}Server dir      :${C_RESET} $server_dir"
+  echo "${C_CYAN}${C_BOLD}Plugin dir      :${C_RESET} $plugin_dir"
+  echo "${C_CYAN}${C_BOLD}Resource ID     :${C_RESET} $resource_id"
+  echo
+
+  local meta
+  meta="$(fetch_metadata "$resource_id" || true)"
+  [[ -n "$meta" ]] || die "Could not fetch metadata for resource ID $resource_id"
+
+  local resource_name file_name external premium file_type version
+  resource_name="$(printf '%s' "$meta" | json_get "name")"
+  file_name="$(printf '%s' "$meta" | json_get "file.name")"
+  external="$(printf '%s' "$meta" | json_get "external")"
+  premium="$(printf '%s' "$meta" | json_get "premium")"
+  file_type="$(printf '%s' "$meta" | json_get "file.type")"
+  version="$(printf '%s' "$meta" | json_get "version.id")"
+
+  if truthy "$premium"; then
+    die "This appears to be a premium Spigot resource. Download it through the vendor-supported method instead."
+  fi
+
+  if truthy "$external"; then
+    warn "This resource uses an external download URL."
+    echo "The script will continue, but it will reject the download if it is not a valid .jar."
+    echo
+
+    if ! truthy "$SPIGOTDL_YES"; then
+      read -rp "Continue? [y/N]: " confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] || die "Cancelled."
+    fi
+  fi
+
+  local output_name
+  output_name="$(make_output_name "$resource_id" "$resource_name" "$file_name" "$output_override")"
+
+  echo "${C_CYAN}${C_BOLD}Plugin name     :${C_RESET} ${resource_name:-unknown}"
+  echo "${C_CYAN}${C_BOLD}Original file   :${C_RESET} ${file_name:-unknown}"
+  echo "${C_CYAN}${C_BOLD}File type       :${C_RESET} ${file_type:-unknown}"
+  echo "${C_CYAN}${C_BOLD}Version ID      :${C_RESET} ${version:-unknown}"
+  echo "${C_CYAN}${C_BOLD}Output file     :${C_RESET} $output_name"
+  echo
+
+  local dest="${plugin_dir}/${output_name}"
+
+  if truthy "$SPIGOTDL_DRY_RUN"; then
+    echo "${C_YELLOW}${C_BOLD}Dry run:${C_RESET} would download $resource_id to $dest"
+    LAST_OUTPUT_NAME="$output_name"
+    LAST_RESOURCE_NAME="$resource_name"
+    LAST_VERSION_ID="$version"
+    LAST_RESOURCE_ID="$resource_id"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp "/tmp/spigotdl-${resource_id}.XXXXXX.jar")"
+
+  echo "${C_BLUE}Downloading...${C_RESET}"
+  curl -fL --retry 3 --connect-timeout 20 \
+    -A "$SPIGOTDL_USER_AGENT" \
+    -o "$tmp" \
+    "${SPIGOTDL_API_URL}/resources/${resource_id}/download"
+
+  if truthy "$SPIGOTDL_REQUIRE_JAR"; then
+    echo "${C_BLUE}Validating jar...${C_RESET}"
+
+    if ! unzip -t "$tmp" >/dev/null 2>&1; then
+      local bad="/tmp/spigotdl-${resource_id}.bad"
+      mv "$tmp" "$bad"
+
+      echo
+      echo "Downloaded file is not a valid jar."
+      echo "Saved bad file to: $bad"
+      echo
+      file "$bad" || true
+      echo
+      echo "First few lines:"
+      head -n 10 "$bad" || true
+      echo
+      die "Download failed validation."
+    fi
+  fi
+
+  if [[ -e "$dest" ]] && truthy "$SPIGOTDL_BACKUP_EXISTING"; then
+    local backup="${dest}.bak.$(date +%Y%m%d-%H%M%S)"
+    echo "Existing file found. Backing up:"
+    echo "  $backup"
+    mv "$dest" "$backup"
+  fi
+
+  install -m "$SPIGOTDL_INSTALL_MODE" "$tmp" "$dest"
+  rm -f "$tmp"
+
+  if [[ -n "$old_filename" && "$old_filename" != "$output_name" && -e "${plugin_dir}/${old_filename}" ]]; then
+    local old_backup="${plugin_dir}/${old_filename}.bak.$(date +%Y%m%d-%H%M%S)"
+    echo "Old filename changed. Backing up old jar:"
+    echo "  $old_backup"
+    mv "${plugin_dir}/${old_filename}" "$old_backup"
+  fi
+
+  if truthy "$SPIGOTDL_AUTO_CHOWN"; then
+    local owner_group
+    owner_group="$(stat -c '%U:%G' "$plugin_dir" 2>/dev/null || true)"
+
+    if [[ -n "$owner_group" && "$owner_group" != "UNKNOWN:UNKNOWN" ]]; then
+      chown "$owner_group" "$dest" 2>/dev/null || true
+    fi
+  fi
+
+  registry_upsert "$plugin_dir" "$resource_id" "$output_name" "$resource_name" "$version" "$source"
+
+  LAST_OUTPUT_NAME="$output_name"
+  LAST_RESOURCE_NAME="$resource_name"
+  LAST_VERSION_ID="$version"
+  LAST_RESOURCE_ID="$resource_id"
+
+  local restart_cmd plugman_cmd
+  echo
+  echo "${C_GREEN}${C_BOLD}Done.${C_RESET}"
+  echo "${C_CYAN}${C_BOLD}Installed:${C_RESET}"
+  echo "  ${C_GREEN}$dest${C_RESET}"
+
+  if [[ -n "$SPIGOTDL_RESTART_CMD_TEMPLATE" ]]; then
+    restart_cmd="$(render_template "$SPIGOTDL_RESTART_CMD_TEMPLATE" "$instance" "$output_name" "$dest" "$server_dir" "$plugin_dir")"
+    echo
+    echo "${C_YELLOW}${C_BOLD}Restart command:${C_RESET}"
+    echo "  ${C_BLUE}$restart_cmd${C_RESET}"
+  fi
+
+  if [[ -n "$SPIGOTDL_PLUGMAN_CMD_TEMPLATE" ]]; then
+    plugman_cmd="$(render_template "$SPIGOTDL_PLUGMAN_CMD_TEMPLATE" "$instance" "$output_name" "$dest" "$server_dir" "$plugin_dir")"
+    echo
+    echo "${C_YELLOW}${C_BOLD}Optional live-load command:${C_RESET}"
+    echo "  ${C_BLUE}$plugman_cmd${C_RESET}"
+  fi
+}
+
+run_download_safely() {
+  local instance="$1"
+  local server_dir="$2"
+  local plugin_dir="$3"
+  local resource="$4"
+  local output_name="${5:-}"
+  local old_filename="${6:-}"
+  local source="${7:-manual}"
+
+  if download_resource "$instance" "$server_dir" "$plugin_dir" "$resource" "$output_name" "$old_filename" "$source"; then
+    return 0
+  fi
+
+  if truthy "$SPIGOTDL_BATCH_CONTINUE_ON_ERROR"; then
+    warn "Continuing after failed download: $resource"
+    return 0
+  fi
+
+  return 1
+}
+
+parse_candidates() {
+  python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+if isinstance(data, dict):
+    data = data.get("data", [])
+
+if not isinstance(data, list):
+    sys.exit(0)
+
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    rid = item.get("id", "")
+    name = item.get("name", "")
+    downloads = item.get("downloads", "")
+    premium = item.get("premium", "")
+    external = item.get("external", "")
+    version = item.get("version", {})
+    file_obj = item.get("file", {})
+    version_id = version.get("id", "") if isinstance(version, dict) else ""
+    file_name = file_obj.get("name", "") if isinstance(file_obj, dict) else ""
+    print(f"{rid}\t{name}\t{downloads}\t{premium}\t{external}\t{version_id}\t{file_name}")
+'
+}
+
+search_candidates() {
+  local query="$1"
+  local encoded
+  encoded="$(urlencode "$query")"
+
+  curl -fsSL "${SPIGOTDL_API_URL}/search/resources/${encoded}?size=${SPIGOTDL_SCAN_MAX_RESULTS}" | parse_candidates
+}
+
+scan_server() {
+  local instance="$1"
+  local server_dir="$2"
+  local plugin_dir="$3"
+
+  echo
+  echo "${C_CYAN}${C_BOLD}Scanning server:${C_RESET} $instance"
+  echo "${C_CYAN}${C_BOLD}Plugin dir     :${C_RESET} $plugin_dir"
+
+  ensure_registry "$plugin_dir"
+
+  local jar count=0 added=0 skipped=0
+  shopt -s nullglob
+
+  for jar in "$plugin_dir"/*.jar "$plugin_dir"/*.JAR; do
+    [[ -f "$jar" ]] || continue
+
+    local filename query candidates candidate_count selected_id selected_name selected_version selected_file choice
+    filename="$(basename "$jar")"
+
+    if registry_has_filename "$plugin_dir" "$filename"; then
+      echo "${C_DIM}Already tracked:${C_RESET} $filename"
+      continue
+    fi
+
+    count=$((count + 1))
+    query="$(guess_resource_query "$filename")"
+    [[ -n "$query" ]] || query="${filename%.jar}"
+
+    echo
+    echo "${C_CYAN}${C_BOLD}Untracked jar:${C_RESET} $filename"
+    echo "Search query: $query"
+
+    candidates="$(search_candidates "$query" || true)"
+    candidate_count="$(printf '%s\n' "$candidates" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+
+    if [[ "$candidate_count" -eq 0 ]]; then
+      warn "No candidates found for $filename"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    selected_id=""
+    selected_name=""
+    selected_version=""
+    selected_file=""
+
+    if truthy "$SPIGOTDL_YES"; then
+      local query_norm cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file cand_norm
+      query_norm="$(normalize_text "$query")"
+
+      while IFS=$'\t' read -r cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file; do
+        cand_norm="$(normalize_text "$cand_name")"
+
+        if [[ "$cand_norm" == "$query_norm" ]] && ! truthy "$cand_premium"; then
+          selected_id="$cand_id"
+          selected_name="$cand_name"
+          selected_version="$cand_version"
+          selected_file="$cand_file"
+          break
+        fi
+      done <<<"$candidates"
+
+      if [[ -z "$selected_id" ]]; then
+        warn "No exact non-premium match found for $filename in --yes mode. Skipping."
+        skipped=$((skipped + 1))
+        continue
+      fi
+    else
+      echo "Candidates:"
+      local i=1 cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file
+      while IFS=$'\t' read -r cand_id cand_name cand_downloads cand_premium cand_external cand_version cand_file; do
+        printf '  %s) [%s] %s  downloads=%s premium=%s external=%s file=%s\n' \
+          "$i" "$cand_id" "$cand_name" "$cand_downloads" "$cand_premium" "$cand_external" "${cand_file:-unknown}"
+        i=$((i + 1))
+      done <<<"$candidates"
+
+      echo "  s) skip"
+      read -rp "Track which candidate for ${filename}? " choice
+
+      if [[ "$choice" =~ ^[Ss]$ || -z "$choice" ]]; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+
+      if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 || "$choice" -gt "$candidate_count" ]]; then
+        warn "Invalid selection. Skipping $filename."
+        skipped=$((skipped + 1))
+        continue
+      fi
+
+      local selected_line
+      selected_line="$(printf '%s\n' "$candidates" | sed -n "${choice}p")"
+      IFS=$'\t' read -r selected_id selected_name _ _ _ selected_version selected_file <<<"$selected_line"
+    fi
+
+    if [[ -z "$selected_id" ]]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    if truthy "$SPIGOTDL_DRY_RUN"; then
+      echo "${C_YELLOW}${C_BOLD}Dry run:${C_RESET} would track $filename as [$selected_id] $selected_name"
+    else
+      registry_upsert "$plugin_dir" "$selected_id" "$filename" "$selected_name" "$selected_version" "scan"
+      echo "${C_GREEN}Tracked:${C_RESET} $filename -> [$selected_id] $selected_name"
+    fi
+
+    added=$((added + 1))
+  done
+
+  shopt -u nullglob
+
+  echo
+  echo "${C_GREEN}${C_BOLD}Scan complete.${C_RESET}"
+  echo "Found untracked jars : $count"
+  echo "Added to registry    : $added"
+  echo "Skipped              : $skipped"
+}
+
+update_server() {
+  local instance="$1"
+  local server_dir="$2"
+  local plugin_dir="$3"
+  local registry
+  registry="$(registry_path "$plugin_dir")"
+
+  echo
+  echo "${C_CYAN}${C_BOLD}Updating server:${C_RESET} $instance"
+  echo "${C_CYAN}${C_BOLD}Registry       :${C_RESET} $registry"
+
+  if [[ ! -f "$registry" ]]; then
+    warn "No registry found for $instance. Run: spigotdl --server $instance --scan"
+    return 0
+  fi
+
+  local checked=0 updated=0 skipped=0 failed=0
+
+  while IFS=$'\t' read -r resource_id filename resource_name version_id installed_at source; do
+    [[ "$resource_id" == "resource_id" ]] && continue
+    [[ -z "$resource_id" ]] && continue
+
+    checked=$((checked + 1))
+
+    local meta latest_version latest_file latest_name
+    meta="$(fetch_metadata "$resource_id" || true)"
+
+    if [[ -z "$meta" ]]; then
+      warn "Could not fetch metadata for $resource_id ($filename)"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    latest_name="$(printf '%s' "$meta" | json_get "name")"
+    latest_file="$(printf '%s' "$meta" | json_get "file.name")"
+    latest_version="$(printf '%s' "$meta" | json_get "version.id")"
+
+    if [[ -n "$version_id" && -n "$latest_version" && "$version_id" == "$latest_version" ]]; then
+      echo "${C_DIM}Up to date:${C_RESET} ${resource_name:-$latest_name} ($filename)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    echo
+    echo "${C_YELLOW}${C_BOLD}Update available or version unknown:${C_RESET} ${resource_name:-$latest_name}"
+    echo "  Current version ID : ${version_id:-unknown}"
+    echo "  Latest version ID  : ${latest_version:-unknown}"
+    echo "  Current file       : ${filename:-unknown}"
+    echo "  Latest file        : ${latest_file:-unknown}"
+
+    if ! run_download_safely "$instance" "$server_dir" "$plugin_dir" "$resource_id" "" "$filename" "update"; then
+      failed=$((failed + 1))
+      continue
+    fi
+
+    updated=$((updated + 1))
+  done < "$registry"
+
+  echo
+  echo "${C_GREEN}${C_BOLD}Update complete.${C_RESET}"
+  echo "Checked : $checked"
+  echo "Updated : $updated"
+  echo "Skipped : $skipped"
+  echo "Failed  : $failed"
+}
+
+process_batch_file() {
+  local batch_file="$1"
+  local default_instance="$2"
+  local default_server_dir="$3"
+  local default_plugin_dir="$4"
+
+  [[ -f "$batch_file" ]] || die "Batch file does not exist: $batch_file"
+
+  local line_no=0 processed=0
+  local line
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_no=$((line_no + 1))
+
+    line="${line%%#*}"
+    line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+    [[ -z "$line" ]] && continue
+
+    local parts=()
+    read -r -a parts <<<"$line"
+
+    local instance server_dir plugin_dir resource output_name
+
+    if [[ -n "$default_instance" || -n "$default_plugin_dir" || -n "$default_server_dir" ]]; then
+      resource="${parts[0]:-}"
+      output_name="${parts[1]:-}"
+      instance="$default_instance"
+      server_dir="$default_server_dir"
+      plugin_dir="$default_plugin_dir"
+    else
+      instance="${parts[0]:-}"
+      resource="${parts[1]:-}"
+      output_name="${parts[2]:-}"
+
+      if [[ -z "$instance" || -z "$resource" ]]; then
+        warn "Invalid batch line ${line_no}: $line"
+        continue
+      fi
+
+      resolve_dirs "$instance" "" ""
+      server_dir="$RESOLVED_SERVER_DIR"
+      plugin_dir="$RESOLVED_PLUGIN_DIR"
+    fi
+
+    if [[ -z "$resource" ]]; then
+      warn "Invalid batch line ${line_no}: $line"
+      continue
+    fi
+
+    run_download_safely "$instance" "$server_dir" "$plugin_dir" "$resource" "$output_name" "" "batch"
+    processed=$((processed + 1))
+  done < "$batch_file"
+
+  echo
+  echo "${C_GREEN}${C_BOLD}Batch complete.${C_RESET}"
+  echo "Processed entries: $processed"
+}
+
 parse_args() {
   SPIGOTDL_ARG_INSTANCE=""
-  SPIGOTDL_ARG_RESOURCE=""
+  SPIGOTDL_ARG_SERVERS=""
   SPIGOTDL_ARG_SERVER_DIR=""
+  SPIGOTDL_ARG_PLUGIN_DIR=""
   SPIGOTDL_ARG_OUTPUT_NAME=""
+  SPIGOTDL_ARG_BATCH_FILE=""
   SPIGOTDL_ARG_LIST="false"
+  SPIGOTDL_ARG_ALL="false"
+  SPIGOTDL_ARG_SCAN="false"
+  SPIGOTDL_ARG_UPDATE="false"
+  SPIGOTDL_DRY_RUN="${SPIGOTDL_DRY_RUN:-false}"
+  SPIGOTDL_ARG_RESOURCES=()
 
   local positional=()
 
@@ -372,6 +1000,22 @@ parse_args() {
         SPIGOTDL_YES="true"
         shift
         ;;
+      --dry-run)
+        SPIGOTDL_DRY_RUN="true"
+        shift
+        ;;
+      --scan)
+        SPIGOTDL_ARG_SCAN="true"
+        shift
+        ;;
+      --update)
+        SPIGOTDL_ARG_UPDATE="true"
+        shift
+        ;;
+      --all)
+        SPIGOTDL_ARG_ALL="true"
+        shift
+        ;;
       -s|--server)
         [[ $# -ge 2 ]] || die "--server requires a value"
         SPIGOTDL_ARG_INSTANCE="$2"
@@ -381,13 +1025,49 @@ parse_args() {
         SPIGOTDL_ARG_INSTANCE="${1#*=}"
         shift
         ;;
+      --servers)
+        [[ $# -ge 2 ]] || die "--servers requires a comma-separated value"
+        SPIGOTDL_ARG_SERVERS="$2"
+        shift 2
+        ;;
+      --servers=*)
+        SPIGOTDL_ARG_SERVERS="${1#*=}"
+        shift
+        ;;
       -r|--resource)
         [[ $# -ge 2 ]] || die "--resource requires a value"
-        SPIGOTDL_ARG_RESOURCE="$2"
+        SPIGOTDL_ARG_RESOURCES+=("$2")
         shift 2
         ;;
       --resource=*)
-        SPIGOTDL_ARG_RESOURCE="${1#*=}"
+        SPIGOTDL_ARG_RESOURCES+=("${1#*=}")
+        shift
+        ;;
+      -b|--batch)
+        [[ $# -ge 2 ]] || die "--batch requires a file"
+        SPIGOTDL_ARG_BATCH_FILE="$2"
+        shift 2
+        ;;
+      --batch=*)
+        SPIGOTDL_ARG_BATCH_FILE="${1#*=}"
+        shift
+        ;;
+      --server-dir)
+        [[ $# -ge 2 ]] || die "--server-dir requires a value"
+        SPIGOTDL_ARG_SERVER_DIR="$2"
+        shift 2
+        ;;
+      --server-dir=*)
+        SPIGOTDL_ARG_SERVER_DIR="${1#*=}"
+        shift
+        ;;
+      --plugin-dir|--plugins-dir)
+        [[ $# -ge 2 ]] || die "--plugin-dir requires a value"
+        SPIGOTDL_ARG_PLUGIN_DIR="$2"
+        shift 2
+        ;;
+      --plugin-dir=*|--plugins-dir=*)
+        SPIGOTDL_ARG_PLUGIN_DIR="${1#*=}"
         shift
         ;;
       -d|--dir)
@@ -425,16 +1105,42 @@ parse_args() {
     esac
   done
 
-  if [[ "${#positional[@]}" -gt 2 ]]; then
-    die "Too many positional arguments. Use: spigotdl <server> <resource>"
+  if [[ "${#positional[@]}" -gt 0 ]]; then
+    if [[ -z "$SPIGOTDL_ARG_INSTANCE" && -z "$SPIGOTDL_ARG_SERVERS" && -z "$SPIGOTDL_ARG_SERVER_DIR" && -z "$SPIGOTDL_ARG_PLUGIN_DIR" ]]; then
+      SPIGOTDL_ARG_INSTANCE="${positional[0]}"
+      local i
+      for ((i=1; i<${#positional[@]}; i++)); do
+        SPIGOTDL_ARG_RESOURCES+=("${positional[$i]}")
+      done
+    else
+      local p
+      for p in "${positional[@]}"; do
+        SPIGOTDL_ARG_RESOURCES+=("$p")
+      done
+    fi
+  fi
+}
+
+build_target_list() {
+  TARGET_SERVERS=()
+
+  if truthy "$SPIGOTDL_ARG_ALL"; then
+    mapfile -t TARGET_SERVERS < <(list_instances)
+  elif [[ -n "$SPIGOTDL_ARG_SERVERS" ]]; then
+    mapfile -t TARGET_SERVERS < <(split_commas "$SPIGOTDL_ARG_SERVERS")
+  elif [[ -n "$SPIGOTDL_ARG_INSTANCE" ]]; then
+    TARGET_SERVERS+=("$SPIGOTDL_ARG_INSTANCE")
+  elif [[ -n "$SPIGOTDL_ARG_SERVER_DIR" || -n "$SPIGOTDL_ARG_PLUGIN_DIR" ]]; then
+    local guessed
+    guessed="$(basename "${SPIGOTDL_ARG_SERVER_DIR:-${SPIGOTDL_ARG_PLUGIN_DIR:-server}}")"
+    [[ "$guessed" == "$SPIGOTDL_PLUGINS_DIR_NAME" ]] && guessed="$(basename "$(dirname "$SPIGOTDL_ARG_PLUGIN_DIR")")"
+    TARGET_SERVERS+=("$guessed")
+  else
+    TARGET_SERVERS+=("$(choose_instance)")
   fi
 
-  if [[ "${#positional[@]}" -ge 1 && -z "$SPIGOTDL_ARG_INSTANCE" ]]; then
-    SPIGOTDL_ARG_INSTANCE="${positional[0]}"
-  fi
-
-  if [[ "${#positional[@]}" -ge 2 && -z "$SPIGOTDL_ARG_RESOURCE" ]]; then
-    SPIGOTDL_ARG_RESOURCE="${positional[1]}"
+  if [[ "${#TARGET_SERVERS[@]}" -eq 0 ]]; then
+    die "No target servers selected."
   fi
 }
 
@@ -459,150 +1165,49 @@ main() {
   need_cmd mktemp
   need_cmd head
   need_cmd file
+  need_cmd wc
+  need_cmd tr
 
-  local instance="$SPIGOTDL_ARG_INSTANCE"
-  local input="$SPIGOTDL_ARG_RESOURCE"
-  local output_override="$SPIGOTDL_ARG_OUTPUT_NAME"
-
-  if [[ -z "$instance" ]]; then
-    instance="$(choose_instance)"
+  # A batch file without any target can specify one target per line:
+  #   server resource [filename]
+  if [[ -n "$SPIGOTDL_ARG_BATCH_FILE" && -z "$SPIGOTDL_ARG_INSTANCE" && -z "$SPIGOTDL_ARG_SERVERS" && -z "$SPIGOTDL_ARG_SERVER_DIR" && -z "$SPIGOTDL_ARG_PLUGIN_DIR" ]] && ! truthy "$SPIGOTDL_ARG_ALL"; then
+    process_batch_file "$SPIGOTDL_ARG_BATCH_FILE" "" "" ""
+    exit 0
   fi
 
-  if [[ -z "$input" ]]; then
-    echo
-    read -rp "Spigot resource ID or link: " input
-  fi
+  build_target_list
 
-  [[ -n "$input" ]] || die "No Spigot resource ID or link provided."
+  local instance server_dir plugin_dir
+  for instance in "${TARGET_SERVERS[@]}"; do
+    resolve_dirs "$instance" "$SPIGOTDL_ARG_SERVER_DIR" "$SPIGOTDL_ARG_PLUGIN_DIR"
+    server_dir="$RESOLVED_SERVER_DIR"
+    plugin_dir="$RESOLVED_PLUGIN_DIR"
 
-  local resource_id
-  resource_id="$(extract_resource_id "$input")" || die "Could not extract a resource ID from: $input"
-
-  local server_dir
-  if [[ -n "$SPIGOTDL_ARG_SERVER_DIR" ]]; then
-    server_dir="$SPIGOTDL_ARG_SERVER_DIR"
-  else
-    server_dir="$(server_dir_from_instance "$instance")"
-  fi
-
-  local plugin_dir="${server_dir}/plugins"
-
-  [[ -d "$server_dir" ]] || die "Server directory does not exist: $server_dir"
-
-  mkdir -p "$plugin_dir" 2>/dev/null || die "Cannot create or access plugin directory: $plugin_dir"
-
-  echo
-  echo "${C_CYAN}${C_BOLD}Server instance :${C_RESET} $instance"
-  echo "${C_CYAN}${C_BOLD}Server dir      :${C_RESET} $server_dir"
-  echo "${C_CYAN}${C_BOLD}Plugin dir      :${C_RESET} $plugin_dir"
-  echo "${C_CYAN}${C_BOLD}Resource ID     :${C_RESET} $resource_id"
-  echo
-
-  local meta
-  meta="$(curl -fsSL "${SPIGOTDL_API_URL}/resources/${resource_id}" || true)"
-  [[ -n "$meta" ]] || die "Could not fetch Spiget metadata for resource ID $resource_id"
-
-  local resource_name file_name external premium file_type version
-  resource_name="$(printf '%s' "$meta" | json_get "name")"
-  file_name="$(printf '%s' "$meta" | json_get "file.name")"
-  external="$(printf '%s' "$meta" | json_get "external")"
-  premium="$(printf '%s' "$meta" | json_get "premium")"
-  file_type="$(printf '%s' "$meta" | json_get "file.type")"
-  version="$(printf '%s' "$meta" | json_get "version.id")"
-
-  if truthy "$premium"; then
-    die "This appears to be a premium Spigot resource. Download it from your Spigot account instead."
-  fi
-
-  if truthy "$external"; then
-    warn "This resource uses an external download URL."
-    echo "The script will continue, but it will reject the download if it is not a valid .jar."
-    echo
-
-    if ! truthy "$SPIGOTDL_YES"; then
-      read -rp "Continue? [y/N]: " confirm
-      [[ "$confirm" =~ ^[Yy]$ ]] || die "Cancelled."
+    if truthy "$SPIGOTDL_ARG_SCAN"; then
+      scan_server "$instance" "$server_dir" "$plugin_dir"
     fi
-  fi
 
-  local output_name
-  output_name="$(make_output_name "$resource_id" "$resource_name" "$file_name" "$output_override")"
-
-  echo "${C_CYAN}${C_BOLD}Plugin name     :${C_RESET} ${resource_name:-unknown}"
-  echo "${C_CYAN}${C_BOLD}Original file   :${C_RESET} ${file_name:-unknown}"
-  echo "${C_CYAN}${C_BOLD}File type       :${C_RESET} ${file_type:-unknown}"
-  echo "${C_CYAN}${C_BOLD}Version ID      :${C_RESET} ${version:-unknown}"
-  echo "${C_CYAN}${C_BOLD}Output file     :${C_RESET} $output_name"
-  echo
-
-  local tmp
-  tmp="$(mktemp "/tmp/spigotdl-${resource_id}.XXXXXX.jar")"
-
-  echo "${C_BLUE}Downloading...${C_RESET}"
-  curl -fL --retry 3 --connect-timeout 20 \
-    -A "$SPIGOTDL_USER_AGENT" \
-    -o "$tmp" \
-    "${SPIGOTDL_API_URL}/resources/${resource_id}/download"
-
-  if truthy "$SPIGOTDL_REQUIRE_JAR"; then
-    echo "${C_BLUE}Validating jar...${C_RESET}"
-
-    if ! unzip -t "$tmp" >/dev/null 2>&1; then
-      local bad="/tmp/spigotdl-${resource_id}.bad"
-      mv "$tmp" "$bad"
-
-      echo
-      echo "Downloaded file is not a valid jar."
-      echo "Saved bad file to: $bad"
-      echo
-      file "$bad" || true
-      echo
-      echo "First few lines:"
-      head -n 10 "$bad" || true
-      echo
-      die "Download failed validation."
+    if truthy "$SPIGOTDL_ARG_UPDATE"; then
+      update_server "$instance" "$server_dir" "$plugin_dir"
     fi
-  fi
 
-  local dest="${plugin_dir}/${output_name}"
-
-  if [[ -e "$dest" ]] && truthy "$SPIGOTDL_BACKUP_EXISTING"; then
-    local backup="${dest}.bak.$(date +%Y%m%d-%H%M%S)"
-    echo "Existing file found. Backing up:"
-    echo "  $backup"
-    mv "$dest" "$backup"
-  fi
-
-  install -m "$SPIGOTDL_INSTALL_MODE" "$tmp" "$dest"
-  rm -f "$tmp"
-
-  if truthy "$SPIGOTDL_AUTO_CHOWN"; then
-    local owner_group
-    owner_group="$(stat -c '%U:%G' "$plugin_dir" 2>/dev/null || true)"
-
-    if [[ -n "$owner_group" && "$owner_group" != "UNKNOWN:UNKNOWN" ]]; then
-      chown "$owner_group" "$dest" 2>/dev/null || true
+    if [[ -n "$SPIGOTDL_ARG_BATCH_FILE" ]]; then
+      process_batch_file "$SPIGOTDL_ARG_BATCH_FILE" "$instance" "$server_dir" "$plugin_dir"
     fi
-  fi
 
-  local plugin_filename plugin_load_name restart_cmd plugman_cmd
-  plugin_filename="$output_name"
-  plugin_load_name="$plugin_filename"
+    if [[ "${#SPIGOTDL_ARG_RESOURCES[@]}" -eq 0 && -z "$SPIGOTDL_ARG_BATCH_FILE" ]] && ! truthy "$SPIGOTDL_ARG_SCAN" && ! truthy "$SPIGOTDL_ARG_UPDATE"; then
+      local input
+      echo
+      read -rp "Spigot resource ID or link: " input
+      [[ -n "$input" ]] || die "No Spigot resource ID or link provided."
+      SPIGOTDL_ARG_RESOURCES+=("$input")
+    fi
 
-  restart_cmd="$(render_template "$SPIGOTDL_RESTART_CMD_TEMPLATE" "$instance" "$plugin_load_name" "$dest" "$server_dir" "$plugin_dir")"
-  plugman_cmd="$(render_template "$SPIGOTDL_PLUGMAN_CMD_TEMPLATE" "$instance" "$plugin_load_name" "$dest" "$server_dir" "$plugin_dir")"
-
-  echo
-  echo "${C_GREEN}${C_BOLD}Done.${C_RESET}"
-  echo "${C_CYAN}${C_BOLD}Installed:${C_RESET}"
-  echo "  ${C_GREEN}$dest${C_RESET}"
-  echo
-  echo "${C_YELLOW}${C_BOLD}Restart the server when ready:${C_RESET}"
-  echo "  ${C_BLUE}$restart_cmd${C_RESET}"
-  echo
-  echo "${C_YELLOW}${C_BOLD}OR..${C_RESET}"
-  echo "${C_CYAN}${C_BOLD}connect to the console & manage via PlugMan:${C_RESET}"
-  echo "  ${C_BLUE}$plugman_cmd${C_RESET}"
+    local resource
+    for resource in "${SPIGOTDL_ARG_RESOURCES[@]}"; do
+      run_download_safely "$instance" "$server_dir" "$plugin_dir" "$resource" "$SPIGOTDL_ARG_OUTPUT_NAME" "" "manual"
+    done
+  done
 }
 
 main "$@"

@@ -1,7 +1,7 @@
 # spigotdl
 
-I got tired of using the -L flag with wget when downloading plugins via Spigot for my linux-hosted minecraft network, so I made
-`spigotdl` - A small Bash CLI tool for downloading Spigot`.jar` files directly into a selected server's `plugins/` folder.
+I got tired of manually managing Spigot plugins for my linux-hosted minecraft network, so I made
+`spigotdl` - A small Bash CLI tool for downloading Spigot`.jar` files directly into a selected server's directory, managing batch downloads, and handling batch updates of multiple plugins in multiple servers across a single server, or network of servers.
 
 It is designed for multi-server Minecraft hosts on linux using a layout such as:
 

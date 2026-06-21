@@ -42,8 +42,8 @@ spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
 
 ## Requirements
 
-- 5 minutes
-- A working Linux server
+- 5-10 minutes depending on install
+- An up-to-date & working Linux server _(hopefully)_
 - Standard CLI tools: `curl`, `unzip`, `python3`, `find`, `file`, and GNU/coreutils tools.
 - Minnecraft server(s) running on bare-metal or of which the files can be accessed directly via CLI
 
@@ -70,7 +70,7 @@ sudo pacman -S --needed bash curl unzip python coreutils findutils file
 
 ## Install
 
-Clone the repository, then install the script:
+Clone & enter the repository, then install the script into your bin:
 
 ```bash
 git clone https://github.com/DALE-GH/spigotdl/
@@ -92,6 +92,7 @@ Verify:
 spigotdl --version
 spigotdl --help
 ```
+_Depending on enviornment you may need to prefix the command with `sudo`_
 
 ## Quick start
 

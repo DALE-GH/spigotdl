@@ -190,20 +190,6 @@ SPIGOTDL_AUTO_CHOWN="true"
 Try to set the installed jar owner/group to match the plugin folder.
 
 ```bash
-SPIGOTDL_COLOR="auto"
-```
-
-Color mode.
-
-Options:
-
-```text
-auto
-always
-never
-```
-
-```bash
 SPIGOTDL_RESTART_CMD_TEMPLATE='sudo systemctl restart mc@{instance}'
 ```
 
@@ -213,7 +199,7 @@ Command printed for restarting the server.
 SPIGOTDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
 ```
 
-Command printed for PlugMan.
+Restart command printed.
 
 Available placeholders:
 

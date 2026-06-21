@@ -2,7 +2,7 @@
 import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
 
-VERSION = "1.3.5"
+VERSION = "1.3.7"
 REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
 DEFAULTS = {
     "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
@@ -109,9 +109,46 @@ def http_json(url):
     req=urllib.request.Request(url, headers={"User-Agent":CFG["SPDL_USER_AGENT"],"Accept":"application/json"})
     with urllib.request.urlopen(req, timeout=35) as r: return json.loads(r.read().decode(r.headers.get_content_charset() or "utf-8", "replace"))
 
+def header_filename(content_disposition):
+    """Return filename from Content-Disposition, if the server provides one."""
+    cd=str(content_disposition or "")
+    if not cd:
+        return ""
+    m=re.search(r"filename\*\s*=\s*(?:UTF-8''|utf-8'')?([^;]+)", cd, re.I)
+    if m:
+        return urllib.parse.unquote(m.group(1).strip().strip('"'))
+    m=re.search(r'filename\s*=\s*"([^";]+)"', cd, re.I)
+    if m:
+        return urllib.parse.unquote(m.group(1).strip())
+    m=re.search(r'filename\s*=\s*([^;]+)', cd, re.I)
+    if m:
+        return urllib.parse.unquote(m.group(1).strip().strip('"'))
+    return ""
+
+def url_filename(url):
+    """Return a jar-looking basename from the final response URL, if available."""
+    try:
+        parsed=urllib.parse.urlparse(str(url))
+        name=Path(urllib.parse.unquote(parsed.path)).name
+        if name.lower().endswith(".jar"):
+            return name
+    except Exception:
+        pass
+    return ""
+
 def http_download(url, path):
+    """
+    Download a file and return the server-supplied filename when available.
+
+    This is important for Spigot/Spiget because the metadata endpoint sometimes
+    does not expose the uploaded jar filename. The actual download response can
+    still include it in Content-Disposition.
+    """
     req=urllib.request.Request(url, headers={"User-Agent":CFG["SPDL_USER_AGENT"]})
-    with urllib.request.urlopen(req, timeout=120) as r, open(path,"wb") as f: shutil.copyfileobj(r,f)
+    with urllib.request.urlopen(req, timeout=120) as r, open(path,"wb") as f:
+        suggested=header_filename(r.headers.get("Content-Disposition")) or url_filename(r.geturl())
+        shutil.copyfileobj(r,f)
+        return suggested
 
 def enc(s): return urllib.parse.quote(str(s), safe="")
 def safe_name(s):
@@ -121,6 +158,53 @@ def validate_jar(p):
     try:
         with zipfile.ZipFile(p) as z: return z.testzip() is None
     except Exception: return False
+
+def is_fallback_filename(provider, project_id, filename):
+    """Return True when filename is a generated fallback, not a real upstream jar name."""
+    fn=safe_name(filename).lower()
+    provider=str(provider or "plugin").lower()
+    pid=str(project_id or "plugin").lower()
+    generated=safe_name(f"{provider}-{project_id}.jar").lower()
+    return (
+        fn == generated
+        or fn.startswith(f"{provider}-{pid}")
+        or fn == safe_name(f"{project_id}.jar").lower()
+    )
+
+def choose_fallback_filename(provider, project_id, suggested, reason):
+    """
+    Prompt when SP-DL has to use a generated filename fallback.
+
+    This prevents installs like extremely-long-resource-title.jar without making
+    automation unusable. In non-interactive mode, the safe fallback is accepted.
+    """
+    suggested=safe_name(suggested or f"{provider}-{project_id}.jar")
+    print()
+    print(f"{Col.yellow}{Col.bold}Filename fallback detected.{Col.reset}")
+    print(f"  Reason   : {reason}")
+    print(f"  Suggested: {Col.yellow}{suggested}{Col.reset}")
+
+    if not sys.stdin.isatty():
+        print(f"  Action   : non-interactive mode, accepting fallback filename")
+        return suggested
+
+    while True:
+        ans=input("Accept fallback filename? [Y=accept / e=edit / q=abort]: ").strip().lower()
+
+        if ans in ("", "y", "yes", "a", "accept"):
+            return suggested
+
+        if ans in ("e", "edit", "m", "modify", "n", "no"):
+            new_name=input("Enter jar filename: ").strip()
+            if not new_name:
+                warn("Filename cannot be empty.")
+                continue
+            return safe_name(new_name)
+
+        if ans in ("q", "quit", "abort", "cancel", "back", "b"):
+            die("Install cancelled by user.")
+
+        warn("Choose y to accept, e to edit, or q to abort.")
 
 def roots(): return [Path(x) for x in CFG["SPDL_SERVER_ROOTS"].split(":") if x]
 
@@ -218,7 +302,7 @@ class Spigot:
         return out
     def latest(self,pid,api="",mc="",rel=""):
         m=http_json(f"{self.base()}/resources/{enc(pid)}"); name=m.get("name",f"spigot-{pid}"); f=m.get("file") or {}; v=m.get("version") or {}
-        return Version("spigot",pid,v.get("id") or m.get("updateDate"),name,"release","bukkit,spigot,paper",mc,f.get("name") or name,f"{self.base()}/resources/{enc(pid)}/download")
+        return Version("spigot",pid,v.get("id") or m.get("updateDate"),name,"release","bukkit,spigot,paper",mc,f.get("name") or f"spigot-{pid}.jar",f"{self.base()}/resources/{enc(pid)}/download")
 class Modrinth:
     name="modrinth"
     def base(self): return CFG["SPDL_MODRINTH_API"].rstrip("/")
@@ -336,24 +420,81 @@ def parse_ref(ref, default="spigot"):
     return default, ref
 
 def install_version(s,v,source="manual",name="",dry=False):
-    ensure_server(s); filename=safe_name(name or v.filename); dest=s["plugin_dir"]/filename
-    print(f"\n{tag()} Installing {site(v.provider,v.provider.upper())} {Col.bold}{v.name}{Col.reset}\n  Server : {s['name']}\n  Target : {dest}\n  Version: {v.version_id or 'unknown'}")
-    if dry: print(f"{Col.yellow}Dry run:{Col.reset} would download {v.url}"); return
+    ensure_server(s)
+
+    explicit_name = bool(str(name or "").strip())
+    filename=safe_name(name or v.filename)
+    dest=s["plugin_dir"]/filename
+
+    print(f"\n{tag()} Installing {site(v.provider,v.provider.upper())} {Col.bold}{v.name}{Col.reset}")
+    print(f"  Server : {s['name']}")
+    if explicit_name:
+        print(f"  Target : {dest}")
+    else:
+        print(f"  Target : {Col.dim}resolving real filename from download...{Col.reset}")
+    print(f"  Version: {v.version_id or 'unknown'}")
+
+    if dry:
+        print(f"{Col.yellow}Dry run:{Col.reset} would download {v.url}")
+        print(f"{Col.yellow}Dry run:{Col.reset} fallback target would be {dest}")
+        return
+
     tmp=Path(tempfile.mkstemp(prefix="spdl-", suffix=".jar")[1])
     try:
-        print(f"{Col.blue}Downloading...{Col.reset}"); http_download(v.url,tmp)
+        print(f"{Col.blue}Downloading...{Col.reset}")
+        downloaded_name=http_download(v.url,tmp) or ""
+
+        if not explicit_name:
+            # Prefer the actual server-provided jar filename. This avoids using
+            # long Spigot resource titles as jar names when Spiget metadata does
+            # not include file.name.
+            if downloaded_name and downloaded_name.lower().endswith(".jar"):
+                real_filename=safe_name(downloaded_name)
+                if real_filename != filename:
+                    print(f"Resolved filename: {Col.green}{real_filename}{Col.reset}")
+                filename=real_filename
+            else:
+                fallback_reason=""
+                suggested=filename
+
+                if len(filename) > 64:
+                    suggested=safe_name(f"{v.provider}-{v.project_id}.jar")
+                    fallback_reason="candidate filename was too long and no real upstream jar filename was available"
+                elif is_fallback_filename(v.provider, v.project_id, filename):
+                    suggested=filename
+                    fallback_reason="provider/API did not expose the real uploaded jar filename"
+
+                if fallback_reason:
+                    filename=choose_fallback_filename(v.provider, v.project_id, suggested, fallback_reason)
+                    print(f"Resolved filename: {Col.yellow}{filename}{Col.reset} {Col.dim}(fallback){Col.reset}")
+            dest=s["plugin_dir"]/filename
+            print(f"  Target : {dest}")
+
         if truthy(CFG["SPDL_VALIDATE_JAR"]):
             print(f"{Col.blue}Validating jar...{Col.reset}")
             if not validate_jar(tmp):
-                bad=tmp.with_suffix(".bad"); tmp.rename(bad); die(f"Downloaded file is not a valid jar. Saved bad file to {bad}")
+                bad=tmp.with_suffix(".bad")
+                tmp.rename(bad)
+                die(f"Downloaded file is not a valid jar. Saved bad file to {bad}")
+
         if dest.exists() and truthy(CFG["SPDL_BACKUP_EXISTING"]):
-            bak=dest.with_name(dest.name+f".bak.{time.strftime('%Y%m%d-%H%M%S')}"); print(f"Backing up existing file: {bak}"); dest.rename(bak)
-        shutil.copy2(tmp,dest); os.chmod(dest, int(CFG["SPDL_INSTALL_MODE"],8))
+            bak=dest.with_name(dest.name+f".bak.{time.strftime('%Y%m%d-%H%M%S')}")
+            print(f"Backing up existing file: {bak}")
+            dest.rename(bak)
+
+        shutil.copy2(tmp,dest)
+        os.chmod(dest, int(CFG["SPDL_INSTALL_MODE"],8))
+
         if truthy(CFG["SPDL_AUTO_CHOWN"]):
-            try: st=s["plugin_dir"].stat(); os.chown(dest, st.st_uid, st.st_gid)
-            except Exception: pass
+            try:
+                st=s["plugin_dir"].stat()
+                os.chown(dest, st.st_uid, st.st_gid)
+            except Exception:
+                pass
+
         upsert_reg(s,{"provider":v.provider,"project_id":v.project_id,"version_id":v.version_id,"filename":filename,"project_name":v.name,"release_type":v.release_type,"loaders":v.loaders,"game_versions":v.versions,"installed_at":now(),"source":source})
         print(f"\n{Col.green}{Col.bold}Done.{Col.reset}\n{Col.cyan}{Col.bold}Installed:{Col.reset}\n  {Col.green}{dest}{Col.reset}")
+
         repl={"{instance}":s["name"],"{filename}":filename,"{dest}":str(dest),"{server_dir}":str(s["server_dir"]),"{plugin_dir}":str(s["plugin_dir"])}
         for label,tpl in (("Restart command",CFG.get("SPDL_RESTART_CMD_TEMPLATE","")),("Optional live-load command",CFG.get("SPDL_PLUGMAN_CMD_TEMPLATE",""))):
             if tpl:

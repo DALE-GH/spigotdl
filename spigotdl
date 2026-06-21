@@ -1,0 +1,608 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPIGOTDL_VERSION="1.0.0"
+
+# -------------------------------------------------------------------
+# Config loading
+# -------------------------------------------------------------------
+# Defaults can be overridden by:
+#   1. /etc/spigotdl.conf
+#   2. ~/.config/spigotdl/config
+#   3. Environment variables
+#
+# Example:
+#   SPIGOTDL_MC_ROOT="/opt/mc"
+#   SPIGOTDL_CONF_DIR="/etc/mc"
+#   SPIGOTDL_FILENAME_MODE="file"
+# -------------------------------------------------------------------
+
+load_config_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+}
+
+load_config_file "/etc/spigotdl.conf"
+
+if [[ -n "${HOME:-}" ]]; then
+  load_config_file "$HOME/.config/spigotdl/config"
+fi
+
+SPIGOTDL_API_URL="${SPIGOTDL_API_URL:-https://api.spiget.org/v2}"
+SPIGOTDL_MC_ROOT="${SPIGOTDL_MC_ROOT:-/opt/mc}"
+SPIGOTDL_CONF_DIR="${SPIGOTDL_CONF_DIR:-/etc/mc}"
+SPIGOTDL_SERVER_DIR_VAR="${SPIGOTDL_SERVER_DIR_VAR:-SERVER_DIR}"
+
+# Hidden dirs and non-server utility dirs are excluded from the interactive menu.
+SPIGOTDL_EXCLUDE_REGEX="${SPIGOTDL_EXCLUDE_REGEX:-(^$|^\..*|^backups?$|^backup$|^cache$|^logs?$|^plugins?$|^old$|^archive$)}"
+
+# Filename modes:
+#   file       = prefer original uploaded .jar filename from Spiget metadata
+#   resource   = use Spigot resource/plugin name
+#   resourceid = use resource-name-resource-id.jar
+SPIGOTDL_FILENAME_MODE="${SPIGOTDL_FILENAME_MODE:-file}"
+
+SPIGOTDL_BACKUP_EXISTING="${SPIGOTDL_BACKUP_EXISTING:-true}"
+SPIGOTDL_AUTO_CHOWN="${SPIGOTDL_AUTO_CHOWN:-true}"
+SPIGOTDL_REQUIRE_JAR="${SPIGOTDL_REQUIRE_JAR:-true}"
+SPIGOTDL_YES="${SPIGOTDL_YES:-false}"
+SPIGOTDL_COLOR="${SPIGOTDL_COLOR:-auto}"
+SPIGOTDL_INSTALL_MODE="${SPIGOTDL_INSTALL_MODE:-0644}"
+SPIGOTDL_USER_AGENT="${SPIGOTDL_USER_AGENT:-Mozilla/5.0 spigotdl/${SPIGOTDL_VERSION}}"
+
+# Output command templates.
+# Available placeholders:
+#   {instance}
+#   {filename}
+#   {dest}
+#   {server_dir}
+#   {plugin_dir}
+SPIGOTDL_RESTART_CMD_TEMPLATE="${SPIGOTDL_RESTART_CMD_TEMPLATE:-sudo systemctl restart mc@{instance}}"
+SPIGOTDL_PLUGMAN_CMD_TEMPLATE="${SPIGOTDL_PLUGMAN_CMD_TEMPLATE:-plugman load {filename}}"
+
+C_RESET=""
+C_BOLD=""
+C_RED=""
+C_GREEN=""
+C_YELLOW=""
+C_BLUE=""
+C_CYAN=""
+
+init_color() {
+  if [[ "${SPIGOTDL_COLOR}" == "never" || -n "${NO_COLOR:-}" ]]; then
+    return 0
+  fi
+
+  if [[ "${SPIGOTDL_COLOR}" == "always" || ( "${SPIGOTDL_COLOR}" == "auto" && -t 1 ) ]]; then
+    C_RESET=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_RED=$'\033[31m'
+    C_GREEN=$'\033[32m'
+    C_YELLOW=$'\033[33m'
+    C_BLUE=$'\033[34m'
+    C_CYAN=$'\033[36m'
+  fi
+}
+
+die() {
+  echo "${C_RED}${C_BOLD}ERROR:${C_RESET} $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "${C_YELLOW}${C_BOLD}WARNING:${C_RESET} $*" >&2
+}
+
+info() {
+  echo "${C_CYAN}${C_BOLD}$*${C_RESET}"
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+usage() {
+  cat <<'HELP'
+spigotdl - Download Spigot plugin jars from the CLI
+
+Usage:
+  spigotdl
+  spigotdl <server> <spigot-resource-id-or-link>
+  spigotdl --server <server> --resource <id-or-link>
+  spigotdl --list
+  spigotdl --help
+
+Examples:
+  spigotdl
+  spigotdl smp 19254
+  spigotdl smp https://www.spigotmc.org/resources/viaversion.19254/
+  spigotdl --server smp --resource 19254 --yes
+  spigotdl --server smp --resource 19254 --name ViaVersion.jar
+
+Options:
+  -s, --server NAME       Server instance name, example: smp
+  -r, --resource VALUE    Spigot resource ID or full Spigot resource URL
+  -d, --dir PATH          Direct server directory override
+  -n, --name FILE.jar     Override output filename
+  -y, --yes               Do not prompt for external download confirmation
+      --list              List detected server instances
+      --no-color          Disable color output
+      --version           Show version
+  -h, --help              Show help
+
+Config files:
+  /etc/spigotdl.conf
+  ~/.config/spigotdl/config
+
+Important config variables:
+  SPIGOTDL_MC_ROOT="/opt/mc"
+  SPIGOTDL_CONF_DIR="/etc/mc"
+  SPIGOTDL_EXCLUDE_REGEX='(^$|^\..*|^backups?$|^backup$|^cache$)'
+  SPIGOTDL_FILENAME_MODE="file"
+  SPIGOTDL_PLUGMAN_CMD_TEMPLATE='plugman load {filename}'
+  SPIGOTDL_RESTART_CMD_TEMPLATE='sudo systemctl restart mc@{instance}'
+HELP
+}
+
+json_get() {
+  local key="$1"
+
+  python3 -c '
+import json
+import sys
+
+key = sys.argv[1]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    sys.exit(0)
+
+value = data
+for part in key.split("."):
+    if isinstance(value, dict):
+        value = value.get(part, "")
+    else:
+        value = ""
+        break
+
+if value is None:
+    value = ""
+
+print(value)
+' "$key"
+}
+
+safe_filename() {
+  local name="$1"
+
+  if [[ -z "$name" ]]; then
+    name="spigot-resource"
+  fi
+
+  printf '%s\n' "$name" \
+    | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//'
+}
+
+extract_resource_id() {
+  local input="$1"
+
+  input="${input%%\?*}"
+  input="${input%%#*}"
+
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    echo "$input"
+    return 0
+  fi
+
+  if [[ "$input" =~ resources/[^/]*\.([0-9]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  local last_number
+  last_number="$(printf '%s\n' "$input" | grep -Eo '[0-9]+' | tail -n1 || true)"
+
+  if [[ -n "$last_number" ]]; then
+    echo "$last_number"
+    return 0
+  fi
+
+  return 1
+}
+
+list_instances() {
+  {
+    find "$SPIGOTDL_CONF_DIR" -maxdepth 1 -type f -name "*.conf" -printf "%f\n" 2>/dev/null | sed 's/\.conf$//'
+    find "$SPIGOTDL_MC_ROOT" -mindepth 1 -maxdepth 1 -type d -printf "%f\n" 2>/dev/null
+  } | grep -Ev "$SPIGOTDL_EXCLUDE_REGEX" | sort -u
+}
+
+server_dir_from_instance() {
+  local instance="$1"
+  local conf="${SPIGOTDL_CONF_DIR}/${instance}.conf"
+  local dir=""
+
+  if [[ -f "$conf" ]]; then
+    dir="$(
+      awk -F= -v key="$SPIGOTDL_SERVER_DIR_VAR" '
+        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+          val=$0
+          sub(/^[^=]*=/, "", val)
+          gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", val)
+          print val
+          exit
+        }
+      ' "$conf"
+    )"
+  fi
+
+  if [[ -n "$dir" ]]; then
+    printf '%s\n' "$dir"
+  else
+    printf '%s/%s\n' "$SPIGOTDL_MC_ROOT" "$instance"
+  fi
+}
+
+choose_instance() {
+  local instances=()
+  mapfile -t instances < <(list_instances)
+
+  if [[ "${#instances[@]}" -eq 0 ]]; then
+    echo "No valid instances found in ${SPIGOTDL_CONF_DIR}/*.conf or ${SPIGOTDL_MC_ROOT}/*" >&2
+    read -rp "Type server instance name manually, example smp: " manual
+    [[ -n "$manual" ]] || die "No server instance provided."
+    echo "$manual"
+    return 0
+  fi
+
+  echo "Available Minecraft instances:" >&2
+
+  local i
+  for i in "${!instances[@]}"; do
+    printf '  %s) %s\n' "$((i + 1))" "${instances[$i]}" >&2
+  done
+
+  echo >&2
+  read -rp "Install to which server? Type number or name: " choice
+  [[ -n "$choice" ]] || die "No server selected."
+
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    local index=$((choice - 1))
+    [[ "$index" -ge 0 && "$index" -lt "${#instances[@]}" ]] || die "Invalid server selection."
+    echo "${instances[$index]}"
+  else
+    echo "$choice"
+  fi
+}
+
+render_template() {
+  local template="$1"
+  local instance="$2"
+  local filename="$3"
+  local dest="$4"
+  local server_dir="$5"
+  local plugin_dir="$6"
+
+  template="${template//\{instance\}/$instance}"
+  template="${template//\{filename\}/$filename}"
+  template="${template//\{dest\}/$dest}"
+  template="${template//\{server_dir\}/$server_dir}"
+  template="${template//\{plugin_dir\}/$plugin_dir}"
+
+  printf '%s\n' "$template"
+}
+
+make_output_name() {
+  local resource_id="$1"
+  local resource_name="$2"
+  local file_name="$3"
+  local override_name="$4"
+  local raw_name=""
+
+  if [[ -n "$override_name" ]]; then
+    raw_name="$override_name"
+  else
+    case "$SPIGOTDL_FILENAME_MODE" in
+      file)
+        raw_name="${file_name:-}"
+        [[ -n "$raw_name" ]] || raw_name="${resource_name:-spigot-resource-${resource_id}}"
+        ;;
+      resource)
+        raw_name="${resource_name:-spigot-resource-${resource_id}}"
+        ;;
+      resourceid)
+        raw_name="${resource_name:-spigot-resource}-${resource_id}"
+        ;;
+      *)
+        die "Invalid SPIGOTDL_FILENAME_MODE: $SPIGOTDL_FILENAME_MODE"
+        ;;
+    esac
+  fi
+
+  local clean_name
+  clean_name="$(safe_filename "$raw_name")"
+  [[ -n "$clean_name" ]] || clean_name="spigot-resource-${resource_id}.jar"
+
+  if [[ "$clean_name" =~ \.jar$ ]]; then
+    printf '%s\n' "$clean_name"
+  else
+    printf '%s.jar\n' "$clean_name"
+  fi
+}
+
+parse_args() {
+  SPIGOTDL_ARG_INSTANCE=""
+  SPIGOTDL_ARG_RESOURCE=""
+  SPIGOTDL_ARG_SERVER_DIR=""
+  SPIGOTDL_ARG_OUTPUT_NAME=""
+  SPIGOTDL_ARG_LIST="false"
+
+  local positional=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --version)
+        echo "spigotdl ${SPIGOTDL_VERSION}"
+        exit 0
+        ;;
+      --list)
+        SPIGOTDL_ARG_LIST="true"
+        shift
+        ;;
+      --no-color)
+        SPIGOTDL_COLOR="never"
+        shift
+        ;;
+      -y|--yes)
+        SPIGOTDL_YES="true"
+        shift
+        ;;
+      -s|--server)
+        [[ $# -ge 2 ]] || die "--server requires a value"
+        SPIGOTDL_ARG_INSTANCE="$2"
+        shift 2
+        ;;
+      --server=*)
+        SPIGOTDL_ARG_INSTANCE="${1#*=}"
+        shift
+        ;;
+      -r|--resource)
+        [[ $# -ge 2 ]] || die "--resource requires a value"
+        SPIGOTDL_ARG_RESOURCE="$2"
+        shift 2
+        ;;
+      --resource=*)
+        SPIGOTDL_ARG_RESOURCE="${1#*=}"
+        shift
+        ;;
+      -d|--dir)
+        [[ $# -ge 2 ]] || die "--dir requires a value"
+        SPIGOTDL_ARG_SERVER_DIR="$2"
+        shift 2
+        ;;
+      --dir=*)
+        SPIGOTDL_ARG_SERVER_DIR="${1#*=}"
+        shift
+        ;;
+      -n|--name)
+        [[ $# -ge 2 ]] || die "--name requires a value"
+        SPIGOTDL_ARG_OUTPUT_NAME="$2"
+        shift 2
+        ;;
+      --name=*)
+        SPIGOTDL_ARG_OUTPUT_NAME="${1#*=}"
+        shift
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          positional+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        die "Unknown option: $1"
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "${#positional[@]}" -gt 2 ]]; then
+    die "Too many positional arguments. Use: spigotdl <server> <resource>"
+  fi
+
+  if [[ "${#positional[@]}" -ge 1 && -z "$SPIGOTDL_ARG_INSTANCE" ]]; then
+    SPIGOTDL_ARG_INSTANCE="${positional[0]}"
+  fi
+
+  if [[ "${#positional[@]}" -ge 2 && -z "$SPIGOTDL_ARG_RESOURCE" ]]; then
+    SPIGOTDL_ARG_RESOURCE="${positional[1]}"
+  fi
+}
+
+main() {
+  parse_args "$@"
+  init_color
+
+  if truthy "$SPIGOTDL_ARG_LIST"; then
+    list_instances
+    exit 0
+  fi
+
+  need_cmd curl
+  need_cmd unzip
+  need_cmd python3
+  need_cmd awk
+  need_cmd sed
+  need_cmd grep
+  need_cmd stat
+  need_cmd find
+  need_cmd install
+  need_cmd mktemp
+  need_cmd head
+  need_cmd file
+
+  local instance="$SPIGOTDL_ARG_INSTANCE"
+  local input="$SPIGOTDL_ARG_RESOURCE"
+  local output_override="$SPIGOTDL_ARG_OUTPUT_NAME"
+
+  if [[ -z "$instance" ]]; then
+    instance="$(choose_instance)"
+  fi
+
+  if [[ -z "$input" ]]; then
+    echo
+    read -rp "Spigot resource ID or link: " input
+  fi
+
+  [[ -n "$input" ]] || die "No Spigot resource ID or link provided."
+
+  local resource_id
+  resource_id="$(extract_resource_id "$input")" || die "Could not extract a resource ID from: $input"
+
+  local server_dir
+  if [[ -n "$SPIGOTDL_ARG_SERVER_DIR" ]]; then
+    server_dir="$SPIGOTDL_ARG_SERVER_DIR"
+  else
+    server_dir="$(server_dir_from_instance "$instance")"
+  fi
+
+  local plugin_dir="${server_dir}/plugins"
+
+  [[ -d "$server_dir" ]] || die "Server directory does not exist: $server_dir"
+
+  mkdir -p "$plugin_dir" 2>/dev/null || die "Cannot create or access plugin directory: $plugin_dir"
+
+  echo
+  echo "${C_CYAN}${C_BOLD}Server instance :${C_RESET} $instance"
+  echo "${C_CYAN}${C_BOLD}Server dir      :${C_RESET} $server_dir"
+  echo "${C_CYAN}${C_BOLD}Plugin dir      :${C_RESET} $plugin_dir"
+  echo "${C_CYAN}${C_BOLD}Resource ID     :${C_RESET} $resource_id"
+  echo
+
+  local meta
+  meta="$(curl -fsSL "${SPIGOTDL_API_URL}/resources/${resource_id}" || true)"
+  [[ -n "$meta" ]] || die "Could not fetch Spiget metadata for resource ID $resource_id"
+
+  local resource_name file_name external premium file_type version
+  resource_name="$(printf '%s' "$meta" | json_get "name")"
+  file_name="$(printf '%s' "$meta" | json_get "file.name")"
+  external="$(printf '%s' "$meta" | json_get "external")"
+  premium="$(printf '%s' "$meta" | json_get "premium")"
+  file_type="$(printf '%s' "$meta" | json_get "file.type")"
+  version="$(printf '%s' "$meta" | json_get "version.id")"
+
+  if truthy "$premium"; then
+    die "This appears to be a premium Spigot resource. Download it from your Spigot account instead."
+  fi
+
+  if truthy "$external"; then
+    warn "This resource uses an external download URL."
+    echo "The script will continue, but it will reject the download if it is not a valid .jar."
+    echo
+
+    if ! truthy "$SPIGOTDL_YES"; then
+      read -rp "Continue? [y/N]: " confirm
+      [[ "$confirm" =~ ^[Yy]$ ]] || die "Cancelled."
+    fi
+  fi
+
+  local output_name
+  output_name="$(make_output_name "$resource_id" "$resource_name" "$file_name" "$output_override")"
+
+  echo "${C_CYAN}${C_BOLD}Plugin name     :${C_RESET} ${resource_name:-unknown}"
+  echo "${C_CYAN}${C_BOLD}Original file   :${C_RESET} ${file_name:-unknown}"
+  echo "${C_CYAN}${C_BOLD}File type       :${C_RESET} ${file_type:-unknown}"
+  echo "${C_CYAN}${C_BOLD}Version ID      :${C_RESET} ${version:-unknown}"
+  echo "${C_CYAN}${C_BOLD}Output file     :${C_RESET} $output_name"
+  echo
+
+  local tmp
+  tmp="$(mktemp "/tmp/spigotdl-${resource_id}.XXXXXX.jar")"
+
+  echo "${C_BLUE}Downloading...${C_RESET}"
+  curl -fL --retry 3 --connect-timeout 20 \
+    -A "$SPIGOTDL_USER_AGENT" \
+    -o "$tmp" \
+    "${SPIGOTDL_API_URL}/resources/${resource_id}/download"
+
+  if truthy "$SPIGOTDL_REQUIRE_JAR"; then
+    echo "${C_BLUE}Validating jar...${C_RESET}"
+
+    if ! unzip -t "$tmp" >/dev/null 2>&1; then
+      local bad="/tmp/spigotdl-${resource_id}.bad"
+      mv "$tmp" "$bad"
+
+      echo
+      echo "Downloaded file is not a valid jar."
+      echo "Saved bad file to: $bad"
+      echo
+      file "$bad" || true
+      echo
+      echo "First few lines:"
+      head -n 10 "$bad" || true
+      echo
+      die "Download failed validation."
+    fi
+  fi
+
+  local dest="${plugin_dir}/${output_name}"
+
+  if [[ -e "$dest" ]] && truthy "$SPIGOTDL_BACKUP_EXISTING"; then
+    local backup="${dest}.bak.$(date +%Y%m%d-%H%M%S)"
+    echo "Existing file found. Backing up:"
+    echo "  $backup"
+    mv "$dest" "$backup"
+  fi
+
+  install -m "$SPIGOTDL_INSTALL_MODE" "$tmp" "$dest"
+  rm -f "$tmp"
+
+  if truthy "$SPIGOTDL_AUTO_CHOWN"; then
+    local owner_group
+    owner_group="$(stat -c '%U:%G' "$plugin_dir" 2>/dev/null || true)"
+
+    if [[ -n "$owner_group" && "$owner_group" != "UNKNOWN:UNKNOWN" ]]; then
+      chown "$owner_group" "$dest" 2>/dev/null || true
+    fi
+  fi
+
+  local plugin_filename plugin_load_name restart_cmd plugman_cmd
+  plugin_filename="$output_name"
+  plugin_load_name="$plugin_filename"
+
+  restart_cmd="$(render_template "$SPIGOTDL_RESTART_CMD_TEMPLATE" "$instance" "$plugin_load_name" "$dest" "$server_dir" "$plugin_dir")"
+  plugman_cmd="$(render_template "$SPIGOTDL_PLUGMAN_CMD_TEMPLATE" "$instance" "$plugin_load_name" "$dest" "$server_dir" "$plugin_dir")"
+
+  echo
+  echo "${C_GREEN}${C_BOLD}Done.${C_RESET}"
+  echo "${C_CYAN}${C_BOLD}Installed:${C_RESET}"
+  echo "  ${C_GREEN}$dest${C_RESET}"
+  echo
+  echo "${C_YELLOW}${C_BOLD}Restart the server when ready:${C_RESET}"
+  echo "  ${C_BLUE}$restart_cmd${C_RESET}"
+  echo
+  echo "${C_YELLOW}${C_BOLD}OR..${C_RESET}"
+  echo "${C_CYAN}${C_BOLD}connect to the console & manage via PlugMan:${C_RESET}"
+  echo "  ${C_BLUE}$plugman_cmd${C_RESET}"
+}
+
+main "$@"

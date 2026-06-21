@@ -22,12 +22,14 @@ It is intended for Linux-hosted Minecraft servers where the server files are acc
 - Modrinth projects
 - Hangar projects
 
-Example:
+Examples:
 
 ```bash
 spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
 ```
-
+```bash
+spigotdl search luckperms --source modrinth --api paper --mc-version 1.21.11
+```
 ## Features
 
 - **Multi-source plugin search**  

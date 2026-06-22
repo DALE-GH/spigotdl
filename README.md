@@ -238,7 +238,7 @@ lobby hangar:ViaVersion/ViaVersion
 ```
 
 
-## Registry v2
+## Registry
 
 Registry files are stored per plugin folder:
 
@@ -260,8 +260,6 @@ game_versions
 installed_at
 source
 ```
-
-_Older v1 registries are migrated automatically when found._
 
 ## Scan existing plugins
 

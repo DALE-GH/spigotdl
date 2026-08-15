@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import argparse, csv, datetime, json, os, re, shutil, sys, tempfile, time, urllib.parse, urllib.request, zipfile
 from pathlib import Path
-
-VERSION = "1.3.7"
+VERSION = "1.4.0"
 REG_COLS = ["provider","project_id","version_id","filename","project_name","release_type","loaders","game_versions","installed_at","source"]
 DEFAULTS = {
     "SPDL_SERVER_ROOTS": os.environ.get("SPIGOTDL_SERVER_ROOTS", os.environ.get("SPIGOTDL_MC_ROOT", "/opt/mc")),
@@ -15,18 +14,16 @@ DEFAULTS = {
     "SPDL_INSTALL_MODE": "0644", "SPDL_COLOR": "auto", "SPDL_DEFAULT_SOURCE": "spigot", "SPDL_SEARCH_LIMIT": "25", "SPDL_SEARCH_PAGE_SIZE": "10",
     "SPDL_PLUGIN_ONLY": "true",
     "SPDL_MODRINTH_PLUGIN_LOADERS": "bukkit,spigot,paper,purpur,folia,velocity,waterfall",
-    "SPDL_USER_AGENT": f"sp-dl/{VERSION} (+https://github.com/yourname/sp-dl)",
+    "SPDL_USER_AGENT": f"sp-dl/{VERSION} (+https://github.com/DALE-GH/spigotdl)",
     "SPDL_SPIGET_API": "https://api.spiget.org/v2", "SPDL_MODRINTH_API": "https://api.modrinth.com/v2", "SPDL_HANGAR_API": "https://hangar.papermc.io/api/v1",
     "SPDL_RESTART_CMD_TEMPLATE": os.environ.get("SPIGOTDL_RESTART_CMD_TEMPLATE", ""),
     "SPDL_PLUGMAN_CMD_TEMPLATE": os.environ.get("SPIGOTDL_PLUGMAN_CMD_TEMPLATE", "plugman load {filename}"),
     "SPDL_BATCH_CONTINUE_ON_ERROR": "true",
 }
-
 class Col:
     reset=bold=dim=red=green=yellow=blue=cyan=gray=""
 
 def truthy(v): return str(v).strip().lower() in {"1","true","yes","y","on"}
-
 def strip_inline_comment(value):
     # Remove comments outside quotes, allowing config like:
     # SPDL_DEFAULT_SOURCE="spigot" # DEFAULT: spigot
@@ -44,7 +41,6 @@ def strip_inline_comment(value):
             break
         out.append(ch)
     return "".join(out).strip()
-
 def parse_conf(path):
     out={}
     p=Path(path)
@@ -60,23 +56,19 @@ def parse_conf(path):
             v=v[1:-1]
         if k: out[k]=v
     return out
-
 CFG=dict(DEFAULTS)
 CFG.update(parse_conf("/etc/spigotdl.conf"))
 CFG.update(parse_conf(Path.home()/".config/spigotdl/config"))
 for k in list(CFG):
     if k in os.environ: CFG[k]=os.environ[k]
-
 # backwards-compatible env aliases
 for old,new in {"SPIGOTDL_COLOR":"SPDL_COLOR","SPIGOTDL_CONF_DIR":"SPDL_CONF_DIR","SPIGOTDL_SERVER_ROOTS":"SPDL_SERVER_ROOTS"}.items():
     if old in os.environ: CFG[new]=os.environ[old]
 CFG["SPDL_DEFAULT_SOURCE"] = str(CFG.get("SPDL_DEFAULT_SOURCE", "spigot")).strip().lower()
-
 def init_color(no=False):
     if no or os.environ.get("NO_COLOR") or CFG.get("SPDL_COLOR") == "never": return
     if CFG.get("SPDL_COLOR") == "always" or (CFG.get("SPDL_COLOR") == "auto" and sys.stdout.isatty()):
         Col.reset="\033[0m"; Col.bold="\033[1m"; Col.dim="\033[2m"; Col.red="\033[31m"; Col.green="\033[32m"; Col.yellow="\033[33m"; Col.blue="\033[34m"; Col.cyan="\033[36m"; Col.gray="\033[90m"
-
 def tag(t="SPDL"): return f"{Col.bold}{Col.blue}[{t}]{Col.reset}"
 def die(msg): print(f"{Col.red}{Col.bold}[ERROR]{Col.reset} {msg}", file=sys.stderr); sys.exit(1)
 def warn(msg): print(f"{Col.yellow}{Col.bold}[WARN]{Col.reset} {msg}", file=sys.stderr)
@@ -84,12 +76,10 @@ def site(provider, s):
     c={"spigot":Col.yellow,"modrinth":Col.green,"hangar":Col.cyan}.get(provider, "")
     return f"{c}{s}{Col.reset}"
 def now(): return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
-
 def clear_screen():
     # Keep non-interactive output readable, but clear real terminal menus.
     if sys.stdout.isatty():
         print("\033[2J\033[H", end="")
-
 def brand():
     # Keep the banner version dynamic. Do not hardcode a version into the ASCII art.
     art = fr"""               =()=
@@ -104,11 +94,9 @@ def brand():
     |_____||__|        |____/ |_____| v{VERSION}"""
     print(f"{Col.yellow}{art}{Col.reset}")
     print(f"{tag()} sp-dl v{VERSION}\n")
-
 def http_json(url):
     req=urllib.request.Request(url, headers={"User-Agent":CFG["SPDL_USER_AGENT"],"Accept":"application/json"})
     with urllib.request.urlopen(req, timeout=35) as r: return json.loads(r.read().decode(r.headers.get_content_charset() or "utf-8", "replace"))
-
 def header_filename(content_disposition):
     """Return filename from Content-Disposition, if the server provides one."""
     cd=str(content_disposition or "")
@@ -124,7 +112,6 @@ def header_filename(content_disposition):
     if m:
         return urllib.parse.unquote(m.group(1).strip().strip('"'))
     return ""
-
 def url_filename(url):
     """Return a jar-looking basename from the final response URL, if available."""
     try:
@@ -139,7 +126,6 @@ def url_filename(url):
 def http_download(url, path):
     """
     Download a file and return the server-supplied filename when available.
-
     This is important for Spigot/Spiget because the metadata endpoint sometimes
     does not expose the uploaded jar filename. The actual download response can
     still include it in Content-Disposition.
@@ -149,7 +135,6 @@ def http_download(url, path):
         suggested=header_filename(r.headers.get("Content-Disposition")) or url_filename(r.geturl())
         shutil.copyfileobj(r,f)
         return suggested
-
 def enc(s): return urllib.parse.quote(str(s), safe="")
 def safe_name(s):
     s=re.sub(r"[^A-Za-z0-9._+-]+","-",str(s or "plugin")).strip("-")
@@ -158,7 +143,6 @@ def validate_jar(p):
     try:
         with zipfile.ZipFile(p) as z: return z.testzip() is None
     except Exception: return False
-
 def is_fallback_filename(provider, project_id, filename):
     """Return True when filename is a generated fallback, not a real upstream jar name."""
     fn=safe_name(filename).lower()
@@ -170,11 +154,9 @@ def is_fallback_filename(provider, project_id, filename):
         or fn.startswith(f"{provider}-{pid}")
         or fn == safe_name(f"{project_id}.jar").lower()
     )
-
-def choose_fallback_filename(provider, project_id, suggested, reason):
+def choose_fallback_filename(provider, project_id, suggested, reason, assume_yes=False):
     """
     Prompt when SP-DL has to use a generated filename fallback.
-
     This prevents installs like extremely-long-resource-title.jar without making
     automation unusable. In non-interactive mode, the safe fallback is accepted.
     """
@@ -183,9 +165,9 @@ def choose_fallback_filename(provider, project_id, suggested, reason):
     print(f"{Col.yellow}{Col.bold}Filename fallback detected.{Col.reset}")
     print(f"  Reason   : {reason}")
     print(f"  Suggested: {Col.yellow}{suggested}{Col.reset}")
-
-    if not sys.stdin.isatty():
-        print(f"  Action   : non-interactive mode, accepting fallback filename")
+    if assume_yes or not sys.stdin.isatty():
+        mode="--yes mode" if assume_yes else "non-interactive mode"
+        print(f"  Action   : {mode}, accepting fallback filename")
         return suggested
 
     while True:
@@ -193,7 +175,6 @@ def choose_fallback_filename(provider, project_id, suggested, reason):
 
         if ans in ("", "y", "yes", "a", "accept"):
             return suggested
-
         if ans in ("e", "edit", "m", "modify", "n", "no"):
             new_name=input("Enter jar filename: ").strip()
             if not new_name:
@@ -205,9 +186,7 @@ def choose_fallback_filename(provider, project_id, suggested, reason):
             die("Install cancelled by user.")
 
         warn("Choose y to accept, e to edit, or q to abort.")
-
 def roots(): return [Path(x) for x in CFG["SPDL_SERVER_ROOTS"].split(":") if x]
-
 def server_dir_from_conf(name):
     p=Path(CFG["SPDL_CONF_DIR"])/f"{name}.conf"
     if not p.exists(): return None
@@ -219,7 +198,6 @@ def server_dir_from_conf(name):
         k,v=line.split("=",1)
         if k.strip()==key: return Path(v.strip().strip("'\""))
     return None
-
 def resolve_server(name="", server_dir="", plugin_dir=""):
     if plugin_dir:
         pd=Path(plugin_dir); return {"name":name or pd.parent.name,"server_dir":pd.parent,"plugin_dir":pd}
@@ -231,7 +209,6 @@ def resolve_server(name="", server_dir="", plugin_dir=""):
         if (root/name).is_dir(): return {"name":name,"server_dir":root/name,"plugin_dir":root/name/CFG["SPDL_PLUGINS_DIR_NAME"]}
     root=roots()[0] if roots() else Path("/opt/mc")
     return {"name":name,"server_dir":root/name,"plugin_dir":root/name/CFG["SPDL_PLUGINS_DIR_NAME"]}
-
 def list_servers():
     names=set(); ex=re.compile(CFG["SPDL_EXCLUDE_REGEX"])
     cd=Path(CFG["SPDL_CONF_DIR"])
@@ -243,7 +220,6 @@ def list_servers():
             for p in root.iterdir():
                 if p.is_dir() and not ex.search(p.name): names.add(p.name)
     return [resolve_server(n) for n in sorted(names)]
-
 def choose_server():
     ss=list_servers()
     if not ss:
@@ -253,11 +229,9 @@ def choose_server():
     c=input("Select server [number/name]: ").strip()
     if c.isdigit() and 1 <= int(c) <= len(ss): return ss[int(c)-1]
     return resolve_server(c)
-
 def ensure_server(s):
     if not s["server_dir"].exists(): die(f"Server directory does not exist: {s['server_dir']}")
     s["plugin_dir"].mkdir(parents=True, exist_ok=True)
-
 def reg_path(s): return s["plugin_dir"]/CFG["SPDL_REGISTRY_DIR"]/CFG["SPDL_REGISTRY_FILE"]
 def read_reg(s):
     p=reg_path(s)
@@ -281,7 +255,6 @@ def migrate_reg(s):
 def upsert_reg(s,row):
     rows=[r for r in read_reg(s) if not (r.get("provider")==row.get("provider") and r.get("project_id")==row.get("project_id"))]
     rows.append(row); write_reg(s, rows)
-
 class Version:
     def __init__(self, provider, project_id, version_id, name, release_type, loaders, versions, filename, url):
         self.provider=provider; self.project_id=str(project_id); self.version_id=str(version_id or ""); self.name=name or str(project_id); self.release_type=release_type or ""; self.loaders=loaders or ""; self.versions=versions or ""; self.filename=safe_name(filename or self.name); self.url=url
@@ -289,7 +262,6 @@ class Result:
     def __init__(self, provider, project_id, name, desc="", downloads=0, stars=0, api="", versions="", rel=""):
         self.provider=provider; self.project_id=str(project_id); self.name=name or str(project_id); self.desc=desc or ""; self.downloads=int(downloads or 0); self.stars=int(stars or 0); self.api=api or ""; self.versions=versions or ""; self.rel=rel or ""
     def ref(self): return f"{self.provider}:{self.project_id}"
-
 class Spigot:
     name="spigot"
     def base(self): return CFG["SPDL_SPIGET_API"].rstrip("/")
@@ -390,7 +362,6 @@ class Hangar:
                     if isinstance(f,dict) and (f.get("filename") or f.get("fileName") or f.get("name")): fname=f.get("filename") or f.get("fileName") or f.get("name"); break
         return Version("hangar",pid,ver,name,rel or "release",api or "paper",mc,fname,f"{self.base()}/projects/{eid}/versions/recommended/download")
 PROVIDERS={"spigot":Spigot(),"modrinth":Modrinth(),"hangar":Hangar()}
-
 def spigot_id(ref):
     ref=str(ref).strip(); clean=ref.split("?",1)[0].split("#",1)[0]
     if clean.isdigit(): return clean
@@ -398,7 +369,6 @@ def spigot_id(ref):
     if m: return m.group(1)
     nums=re.findall(r"[0-9]+", clean)
     return nums[-1] if nums else ref
-
 def parse_ref(ref, default="spigot"):
     ref=str(ref).strip(); default=str(default or "spigot").strip().lower()
     if default not in PROVIDERS:
@@ -418,32 +388,31 @@ def parse_ref(ref, default="spigot"):
     if default == "spigot":
         return "spigot", spigot_id(ref)
     return default, ref
-
-def install_version(s,v,source="manual",name="",dry=False):
+def install_version(s,v,source="manual",name="",dry=False,track=True,post_install=True,assume_yes=False):
     ensure_server(s)
 
     explicit_name = bool(str(name or "").strip())
     filename=safe_name(name or v.filename)
     dest=s["plugin_dir"]/filename
-
     print(f"\n{tag()} Installing {site(v.provider,v.provider.upper())} {Col.bold}{v.name}{Col.reset}")
-    print(f"  Server : {s['name']}")
+    if track:
+        print(f"  Server : {s['name']}")
+    else:
+        print(f"  Output : {s['plugin_dir']}")
     if explicit_name:
         print(f"  Target : {dest}")
     else:
         print(f"  Target : {Col.dim}resolving real filename from download...{Col.reset}")
     print(f"  Version: {v.version_id or 'unknown'}")
-
     if dry:
         print(f"{Col.yellow}Dry run:{Col.reset} would download {v.url}")
         print(f"{Col.yellow}Dry run:{Col.reset} fallback target would be {dest}")
-        return
+        return dest
 
     tmp=Path(tempfile.mkstemp(prefix="spdl-", suffix=".jar")[1])
     try:
         print(f"{Col.blue}Downloading...{Col.reset}")
         downloaded_name=http_download(v.url,tmp) or ""
-
         if not explicit_name:
             # Prefer the actual server-provided jar filename. This avoids using
             # long Spigot resource titles as jar names when Spiget metadata does
@@ -456,27 +425,23 @@ def install_version(s,v,source="manual",name="",dry=False):
             else:
                 fallback_reason=""
                 suggested=filename
-
                 if len(filename) > 64:
                     suggested=safe_name(f"{v.provider}-{v.project_id}.jar")
                     fallback_reason="candidate filename was too long and no real upstream jar filename was available"
                 elif is_fallback_filename(v.provider, v.project_id, filename):
                     suggested=filename
                     fallback_reason="provider/API did not expose the real uploaded jar filename"
-
                 if fallback_reason:
-                    filename=choose_fallback_filename(v.provider, v.project_id, suggested, fallback_reason)
+                    filename=choose_fallback_filename(v.provider, v.project_id, suggested, fallback_reason, assume_yes)
                     print(f"Resolved filename: {Col.yellow}{filename}{Col.reset} {Col.dim}(fallback){Col.reset}")
             dest=s["plugin_dir"]/filename
             print(f"  Target : {dest}")
-
         if truthy(CFG["SPDL_VALIDATE_JAR"]):
             print(f"{Col.blue}Validating jar...{Col.reset}")
             if not validate_jar(tmp):
                 bad=tmp.with_suffix(".bad")
                 tmp.rename(bad)
                 die(f"Downloaded file is not a valid jar. Saved bad file to {bad}")
-
         if dest.exists() and truthy(CFG["SPDL_BACKUP_EXISTING"]):
             bak=dest.with_name(dest.name+f".bak.{time.strftime('%Y%m%d-%H%M%S')}")
             print(f"Backing up existing file: {bak}")
@@ -484,32 +449,46 @@ def install_version(s,v,source="manual",name="",dry=False):
 
         shutil.copy2(tmp,dest)
         os.chmod(dest, int(CFG["SPDL_INSTALL_MODE"],8))
-
         if truthy(CFG["SPDL_AUTO_CHOWN"]):
             try:
                 st=s["plugin_dir"].stat()
                 os.chown(dest, st.st_uid, st.st_gid)
             except Exception:
                 pass
-
-        upsert_reg(s,{"provider":v.provider,"project_id":v.project_id,"version_id":v.version_id,"filename":filename,"project_name":v.name,"release_type":v.release_type,"loaders":v.loaders,"game_versions":v.versions,"installed_at":now(),"source":source})
+        if track:
+            upsert_reg(s,{"provider":v.provider,"project_id":v.project_id,"version_id":v.version_id,"filename":filename,"project_name":v.name,"release_type":v.release_type,"loaders":v.loaders,"game_versions":v.versions,"installed_at":now(),"source":source})
         print(f"\n{Col.green}{Col.bold}Done.{Col.reset}\n{Col.cyan}{Col.bold}Installed:{Col.reset}\n  {Col.green}{dest}{Col.reset}")
-
-        repl={"{instance}":s["name"],"{filename}":filename,"{dest}":str(dest),"{server_dir}":str(s["server_dir"]),"{plugin_dir}":str(s["plugin_dir"])}
-        for label,tpl in (("Restart command",CFG.get("SPDL_RESTART_CMD_TEMPLATE","")),("Optional live-load command",CFG.get("SPDL_PLUGMAN_CMD_TEMPLATE",""))):
-            if tpl:
-                for k,val in repl.items(): tpl=tpl.replace(k,val)
-                print(f"\n{Col.yellow}{Col.bold}{label}:{Col.reset}\n  {Col.blue}{tpl}{Col.reset}")
+        if post_install:
+            repl={"{instance}":s["name"],"{filename}":filename,"{dest}":str(dest),"{server_dir}":str(s["server_dir"]),"{plugin_dir}":str(s["plugin_dir"])}
+            for label,tpl in (("Restart command",CFG.get("SPDL_RESTART_CMD_TEMPLATE","")),("Optional live-load command",CFG.get("SPDL_PLUGMAN_CMD_TEMPLATE",""))):
+                if tpl:
+                    for k,val in repl.items(): tpl=tpl.replace(k,val)
+                    print(f"\n{Col.yellow}{Col.bold}{label}:{Col.reset}\n  {Col.blue}{tpl}{Col.reset}")
+        return dest
     finally:
         try: tmp.unlink()
         except Exception: pass
-
 def install_ref(s, ref, api="", mc="", rel="", name="", source="manual", dry=False):
     p,pid=parse_ref(ref, CFG["SPDL_DEFAULT_SOURCE"]); install_version(s, PROVIDERS[p].latest(pid,api,mc,rel), source, name, dry)
 
 def _norm_rank_text(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-
+def result_match_level(q,r):
+    """Return a stable confidence bucket for a search result; lower is better."""
+    qn=_norm_rank_text(q)
+    if not qn:
+        return 4
+    names=[r.name, r.project_id, str(r.project_id).rsplit("/",1)[-1]]
+    norms=[_norm_rank_text(x) for x in names if x]
+    if qn in norms:
+        return 0
+    if any(x.startswith(qn) for x in norms if x):
+        return 1
+    if any(qn in x for x in norms if x):
+        return 2
+    if qn in _norm_rank_text(r.desc):
+        return 3
+    return 4
 def search_all(q, sources, limit, sort, api="", mc="", rel=""):
     out=[]
     for p in sources:
@@ -517,19 +496,10 @@ def search_all(q, sources, limit, sort, api="", mc="", rel=""):
             out += PROVIDERS[p].search(q,limit,sort,api,mc,rel)
         except Exception as e:
             warn(f"{p} search failed: {e}")
-    qn=_norm_rank_text(q)
     def rank(r):
-        rn=_norm_rank_text(r.name)
-        rd=_norm_rank_text(r.desc)
-        if rn == qn: match=0
-        elif rn.startswith(qn): match=1
-        elif qn and qn in rn: match=2
-        elif qn and qn in rd: match=3
-        else: match=4
         provider_order={"spigot":0,"modrinth":1,"hangar":2}.get(r.provider,9)
-        return (match, -int(getattr(r,"downloads",0) or 0), provider_order, str(r.name).lower())
+        return (result_match_level(q,r), -int(getattr(r,"downloads",0) or 0), provider_order, str(r.name).lower())
     return sorted(out, key=rank)
-
 def search_page_size():
     try:
         return max(1, int(CFG.get("SPDL_SEARCH_PAGE_SIZE", "10")))
@@ -546,14 +516,12 @@ def print_results(rs, page=1, page_size=None, title="Search Results", context_li
     start=(page-1)*page_size
     end=min(start+page_size,total)
     width=max(2,len(str(end)))
-
     print(f"\n{tag()} {title} {Col.dim}({start+1}-{end} of {total}){Col.reset}")
 
     if context_lines:
         for line in context_lines:
             print(line)
         print()
-
     for i,r in enumerate(rs[start:end],start+1):
         print(f"{Col.bold}{i:>{width}}){Col.reset} {site(r.provider,'['+r.provider.upper()+']')} {Col.bold}{r.name}{Col.reset}")
         print(f"     ID        : {r.ref()}")
@@ -564,14 +532,12 @@ def print_results(rs, page=1, page_size=None, title="Search Results", context_li
         if r.versions: print(f"     Versions  : {r.versions}")
         if r.rel: print(f"     Release   : {r.rel}")
         print()
-
     if footer:
         print(f"{Col.dim}{footer}{Col.reset}")
 
 def prompt_result_choice(prompt, result_count, allow_more=False, visible_count=None, context=""):
     visible_count = visible_count or min(search_page_size(), result_count)
     visible_count = min(max(0, visible_count), result_count)
-
     parts = []
     if visible_count:
         parts.append(f"1-{visible_count}")
@@ -585,7 +551,6 @@ def prompt_result_choice(prompt, result_count, allow_more=False, visible_count=N
         if context:
             print(f"{Col.dim}{context}{Col.reset}")
         c=input(prompt + " " + suffix).strip().lower()
-
         if c in ("", "s", "skip", "n", "next"):
             return "skip"
         if c in ("q", "quit", "exit", "b", "back"):
@@ -594,12 +559,10 @@ def prompt_result_choice(prompt, result_count, allow_more=False, visible_count=N
             return "more"
         if c.isdigit() and 1 <= int(c) <= visible_count:
             return int(c) - 1
-
         if visible_count:
             warn(f"Invalid choice. Enter 1-{visible_count}, s/next to skip, q/back to quit" + (", or m for more." if allow_more else "."))
         else:
             warn("Invalid choice. Enter s/next to skip or q/back to quit" + (", or m for more." if allow_more else "."))
-
 def update_server(s,dry=False):
     ensure_server(s); migrate_reg(s); rows=read_reg(s); checked=outdated=updated=failed=0
     if not rows: warn(f"No registry for {s['name']}. Run: spigotdl scan --server {s['name']}"); return (0,0,0,0)
@@ -617,7 +580,6 @@ def update_server(s,dry=False):
             if not dry: install_version(s,v,"update"); updated+=1
     print(f"\n{tag()} Update summary: checked={checked} outdated={outdated} updated={updated} failed={failed}")
     return checked,outdated,updated,failed
-
 def guess_name(jar):
     n=Path(jar).stem; n=re.sub(r"[-_. ]+v?\d[\w.+-]*$","",n); return re.sub(r"[-_. ]+(bukkit|spigot|paper|velocity|waterfall|fabric|forge)$","",n,flags=re.I) or Path(jar).stem
 
@@ -628,7 +590,6 @@ def scan_server(s,sources,yes=False,dry=False):
     total_jars=len(jars)
     page_step=search_page_size()
     added=skipped=0
-
     if yes:
         print(f"\n{tag()} Scanning {s['name']}\n  Plugin dir: {s['plugin_dir']}")
 
@@ -641,7 +602,6 @@ def scan_server(s,sources,yes=False,dry=False):
         q=guess_name(jar)
         limit=max(page_step, int(CFG.get("SPDL_SEARCH_LIMIT", "25")))
         rs=search_all(q,sources,limit,"relevance")
-
         if not rs:
             skipped+=1
             if yes:
@@ -659,7 +619,6 @@ def scan_server(s,sources,yes=False,dry=False):
                     print(f"\n{tag()} Scan stopped by user. added={added} skipped={skipped} total_jars={total_jars}")
                     return
             continue
-
         if yes:
             norm=lambda x: re.sub(r"[^a-z0-9]+","",x.lower())
             sel=next((r for r in rs if norm(r.name)==norm(q)),None)
@@ -710,7 +669,6 @@ def scan_server(s,sources,yes=False,dry=False):
                 break
             if not sel:
                 continue
-
         if dry:
             print(f"{Col.yellow}Dry run:{Col.reset} would track {jar.name} as {sel.ref()}")
             if not yes:
@@ -725,11 +683,9 @@ def scan_server(s,sources,yes=False,dry=False):
                 print(f"\n{Col.green}Tracked:{Col.reset} {jar.name} -> {sel.ref()}")
                 input("Press Enter for next plugin...")
         added+=1
-
     if not yes:
         clear_screen(); brand()
     print(f"\n{tag()} Scan summary: added={added} skipped={skipped} total_jars={total_jars}")
-
 def overview(servers,check=True,details=False):
     print(f"\n{tag()} Server Overview\n")
     print(f"{Col.bold}{'Server':<18} {'Plugins':>7} {'Tracked':>7} {'Untracked':>9} {'Outdated':>8} {'Status':<13} Directory{Col.reset}")
@@ -758,6 +714,154 @@ def overview(servers,check=True,details=False):
                 for r,v,reason in detail:
                     if v: print(f"  {Col.yellow}UPDATE{Col.reset} {r.get('project_name')} [{r.get('provider')}] {r.get('version_id') or 'unknown'} -> {v.version_id or 'unknown'}")
                     else: print(f"  {Col.red}CHECK_FAILED{Col.reset} {r.get('project_name')} [{r.get('provider')}] {reason}")
+
+def fetch_target(output="."):
+    """Build an install target for a plain directory without treating it as a managed server."""
+    pd=Path(output or ".").expanduser().resolve()
+    pd.mkdir(parents=True, exist_ok=True)
+    return {"name":pd.name or ".","server_dir":pd,"plugin_dir":pd}
+
+def load_fetch_queries(file):
+    """Read one human-readable plugin search query per line and discard blanks/comments/duplicates."""
+    if str(file).strip() == "-":
+        label="<stdin>"
+        lines=sys.stdin.read().splitlines()
+    else:
+        path=Path(str(file).strip()).expanduser()
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"Plugin list not found: {path}")
+        label=str(path)
+        lines=path.read_text(errors="replace").splitlines()
+
+    entries=[]; seen=set()
+    for no,raw in enumerate(lines,1):
+        query=raw.split("#",1)[0].strip()
+        if not query:
+            continue
+        key=_norm_rank_text(query) or query.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((no,query))
+    return label,entries
+
+def choose_fetch_result(query, results, noninteractive=False):
+    """
+    Automatically accept the best exact normalized name/slug match.
+    Ambiguous results require a choice; unattended mode skips them safely.
+    """
+    exact=[r for r in results if result_match_level(query,r)==0]
+    if exact:
+        return exact[0]
+    if noninteractive or not results:
+        return None
+
+    visible=min(search_page_size(),len(results))
+    while True:
+        print_results(
+            results,
+            page=1,
+            page_size=visible,
+            title=f"Fetch candidates: {query}",
+            context_lines=[f"No exact match was found for {Col.bold}{query}{Col.reset}."],
+            footer=f"Showing 1-{visible} of {len(results)} results | s=skip, q=stop fetch" + (", m=show more" if visible < len(results) else "")
+        )
+        choice=prompt_result_choice(
+            f"Download which result for {query}?",
+            len(results),
+            allow_more=(visible < len(results)),
+            visible_count=visible,
+        )
+        if choice == "more":
+            visible=min(visible+search_page_size(),len(results))
+            continue
+        if choice in ("skip","quit"):
+            return choice
+        return results[choice]
+
+def resolve_fetch_version(query, selected, results, api="", mc="", rel=""):
+    """Resolve the selected project, falling back only to other exact matches if needed."""
+    candidates=[selected]
+    if result_match_level(query,selected)==0:
+        candidates += [r for r in results if r is not selected and result_match_level(query,r)==0]
+
+    errors=[]
+    for r in candidates:
+        try:
+            return r,PROVIDERS[r.provider].latest(r.project_id,api,mc,rel)
+        except Exception as e:
+            errors.append(f"{r.ref()}: {e}")
+    raise RuntimeError("; ".join(errors) if errors else f"Unable to resolve {selected.ref()}")
+
+def process_fetch(file,args):
+    try:
+        label,entries=load_fetch_queries(file)
+    except Exception as e:
+        warn(str(e))
+        return {"requested":0,"downloaded":0,"skipped":0,"failed":1}
+
+    if not entries:
+        warn("Plugin list contains no plugin names.")
+        return {"requested":0,"downloaded":0,"skipped":0,"failed":0}
+
+    target=fetch_target(args.output)
+    sources=list(PROVIDERS) if args.source=="all" else [args.source]
+    noninteractive=bool(args.yes or not sys.stdin.isatty())
+    downloaded=skipped=failed=0
+
+    print(f"\n{tag()} Fetch Plugin List")
+    print(f"  List   : {label}")
+    print(f"  Output : {target['plugin_dir']}")
+    print(f"  Sources: {', '.join(sources)}")
+    if args.api: print(f"  API    : {args.api}")
+    if args.mc_version: print(f"  MC     : {args.mc_version}")
+    if args.release: print(f"  Release: {args.release}")
+
+    for idx,(line_no,query) in enumerate(entries,1):
+        print(f"\n{tag()} [{idx}/{len(entries)}] Searching: {Col.bold}{query}{Col.reset}")
+        try:
+            results=search_all(query,sources,args.limit,"relevance",args.api,args.mc_version,args.release)
+        except Exception as e:
+            warn(f"Search failed for {query}: {e}"); failed+=1; continue
+        if not results:
+            warn(f"No results found for {query} (line {line_no})."); failed+=1; continue
+
+        selected=choose_fetch_result(query,results,noninteractive)
+        if selected == "quit":
+            print(f"\n{tag()} Fetch stopped by user.")
+            break
+        if selected in (None,"skip"):
+            best=results[0]
+            if noninteractive:
+                warn(f"No exact match for {query}; skipped. Best candidate was {best.name} ({best.ref()}).")
+            skipped+=1
+            continue
+
+        confidence={0:"exact",1:"prefix",2:"partial",3:"description",4:"weak"}.get(result_match_level(query,selected),"unknown")
+        print(f"  Match  : {confidence}")
+        print(f"  Project: {selected.name} ({selected.ref()})")
+        print(f"  Downloads: {selected.downloads}")
+
+        try:
+            resolved,version=resolve_fetch_version(query,selected,results,args.api,args.mc_version,args.release)
+            if resolved is not selected:
+                print(f"  Fallback: {resolved.name} ({resolved.ref()})")
+            install_version(target,version,"fetch","",args.dry_run,track=False,post_install=False,assume_yes=noninteractive)
+            downloaded+=1
+        except Exception as e:
+            warn(f"Fetch failed for {query}: {e}")
+            failed+=1
+            if not truthy(CFG["SPDL_BATCH_CONTINUE_ON_ERROR"]):
+                raise
+
+    action="Planned" if args.dry_run else "Downloaded"
+    print(f"\n{tag()} Fetch complete.")
+    print(f"  Requested : {len(entries)}")
+    print(f"  {action:<9}: {downloaded}")
+    print(f"  Skipped   : {skipped}")
+    print(f"  Failed    : {failed}")
+    print(f"  Output    : {target['plugin_dir']}")
+    return {"requested":len(entries),"downloaded":downloaded,"skipped":skipped,"failed":failed}
 
 def process_batch(file, default_s, args):
     path=Path(str(file).strip()).expanduser()
@@ -788,11 +892,10 @@ def process_batch(file, default_s, args):
             warn(f"Batch line {no} failed: {e}")
             if not truthy(CFG["SPDL_BATCH_CONTINUE_ON_ERROR"]): raise
     print(f"\n{tag()} Batch complete. Processed entries: {count}")
-
 def menu():
     brand()
     while True:
-        print(f"{tag()} Main Menu\n  1) Search plugins\n  2) Install by ID / URL / provider ref\n  3) Batch install\n  4) Scan installed plugins\n  5) Update tracked plugins\n  6) Server overview\n  7) List servers\n  0) Exit\n")
+        print(f"{tag()} Main Menu\n  1) Search plugins\n  2) Install by ID / URL / provider ref\n  3) Batch install\n  4) Fetch plugin list to a directory\n  5) Scan installed plugins\n  6) Update tracked plugins\n  7) Server overview\n  8) List servers\n  0) Exit\n")
         c=input("Select: ").strip()
         if c=="0": return
         if c=="1":
@@ -818,18 +921,27 @@ def menu():
             if batch_file.lower() in ("b","back","q","quit",""):
                 continue
             process_batch(batch_file, choose_server(), argparse.Namespace(api="",mc_version="",release="",dry_run=False))
-        elif c=="4": scan_server(choose_server(), list(PROVIDERS))
-        elif c=="5": update_server(choose_server())
-        elif c=="6": overview(list_servers(), True, True)
-        elif c=="7": [print(f"{s['name']}\t{s['server_dir']}\t{s['plugin_dir']}") for s in list_servers()]
+        elif c=="4":
+            print(f"{tag()} Fetch Plugin List")
+            fetch_file=input("Plugin list path [b=back]: ").strip()
+            if fetch_file.lower() in ("b","back","q","quit",""):
+                continue
+            output=input("Output directory [.]: ").strip() or "."
+            process_fetch(fetch_file,argparse.Namespace(
+                output=output,source="all",api="",mc_version="",release="",
+                limit=max(search_page_size(),int(CFG.get("SPDL_SEARCH_LIMIT","25"))),
+                yes=False,dry_run=False
+            ))
+        elif c=="5": scan_server(choose_server(), list(PROVIDERS))
+        elif c=="6": update_server(choose_server())
+        elif c=="7": overview(list_servers(), True, True)
+        elif c=="8": [print(f"{s['name']}\t{s['server_dir']}\t{s['plugin_dir']}") for s in list_servers()]
         else: warn("Invalid choice")
-
 def targets(args):
     if getattr(args,"all",False): return list_servers()
     if getattr(args,"servers",""): return [resolve_server(x.strip()) for x in args.servers.split(",") if x.strip()]
     if getattr(args,"server","") or getattr(args,"server_dir","") or getattr(args,"plugin_dir",""): return [resolve_server(getattr(args,"server",""), getattr(args,"server_dir",""), getattr(args,"plugin_dir",""))]
     return [choose_server()]
-
 def build_parser():
     p=argparse.ArgumentParser(prog="spigotdl", description="SP-DL Minecraft plugin downloader/updater")
     p.add_argument("--version", action="store_true"); p.add_argument("--no-color", action="store_true")
@@ -838,16 +950,15 @@ def build_parser():
     s=sub.add_parser("search"); s.add_argument("query", nargs="+"); s.add_argument("--source", choices=["spigot","modrinth","hangar","all"], default="all"); s.add_argument("--api", default=""); s.add_argument("--mc-version","--version",dest="mc_version",default=""); s.add_argument("--release", choices=["release","beta","alpha","snapshot"], default=""); s.add_argument("--sort", choices=["relevance","downloads","stars","updated","newest"], default="relevance"); s.add_argument("--limit", type=int, default=25); s.add_argument("--server", default=""); s.add_argument("--server-dir", default=""); s.add_argument("--plugin-dir", default=""); s.add_argument("--install", action="store_true"); s.add_argument("--dry-run", action="store_true")
     i=sub.add_parser("install"); i.add_argument("refs", nargs="+"); i.add_argument("--server","-s",default=""); i.add_argument("--server-dir",default=""); i.add_argument("--plugin-dir",default=""); i.add_argument("--api",default=""); i.add_argument("--mc-version","--version",dest="mc_version",default=""); i.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); i.add_argument("--name","-n",default=""); i.add_argument("--dry-run",action="store_true")
     b=sub.add_parser("batch"); b.add_argument("file"); b.add_argument("--server","-s",default=""); b.add_argument("--server-dir",default=""); b.add_argument("--plugin-dir",default=""); b.add_argument("--api",default=""); b.add_argument("--mc-version","--version",dest="mc_version",default=""); b.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); b.add_argument("--dry-run",action="store_true")
+    f=sub.add_parser("fetch"); f.add_argument("file",help="text file with one plugin name/search query per line, or - for stdin"); f.add_argument("--output","-o",default=".",help="download directory (default: current directory)"); f.add_argument("--source",choices=["spigot","modrinth","hangar","all"],default="all"); f.add_argument("--api",default=""); f.add_argument("--mc-version","--version",dest="mc_version",default=""); f.add_argument("--release",choices=["release","beta","alpha","snapshot"],default=""); f.add_argument("--limit",type=int,default=max(search_page_size(),int(CFG.get("SPDL_SEARCH_LIMIT","25")))); f.add_argument("--yes","-y",action="store_true",help="unattended mode: accept exact matches and skip ambiguous matches"); f.add_argument("--dry-run",action="store_true")
     sc=sub.add_parser("scan"); sc.add_argument("--server","-s",default=""); sc.add_argument("--server-dir",default=""); sc.add_argument("--plugin-dir",default=""); sc.add_argument("--source",choices=["spigot","modrinth","hangar","all"],default="all"); sc.add_argument("--yes","-y",action="store_true"); sc.add_argument("--dry-run",action="store_true")
     u=sub.add_parser("update"); u.add_argument("--server","-s",default=""); u.add_argument("--servers",default=""); u.add_argument("--all",action="store_true"); u.add_argument("--server-dir",default=""); u.add_argument("--plugin-dir",default=""); u.add_argument("--dry-run",action="store_true")
     o=sub.add_parser("overview"); o.add_argument("--server","-s",default=""); o.add_argument("--servers",default=""); o.add_argument("--all",action="store_true"); o.add_argument("--server-dir",default=""); o.add_argument("--plugin-dir",default=""); o.add_argument("--no-check",action="store_true"); o.add_argument("--details",action="store_true")
     return p
-
 def legacy(argv):
-    if argv and not argv[0].startswith("-") and argv[0] not in {"menu","search","install","batch","scan","update","overview","list"} and len(argv)>=2:
+    if argv and not argv[0].startswith("-") and argv[0] not in {"menu","search","install","batch","fetch","scan","update","overview","list"} and len(argv)>=2:
         return argparse.Namespace(cmd="install",refs=argv[1:],server=argv[0],server_dir="",plugin_dir="",api="",mc_version="",release="",name="",dry_run=False)
     return None
-
 def main(argv=None):
     argv=list(sys.argv[1:] if argv is None else argv); init_color("--no-color" in argv)
     if not argv: menu(); return
@@ -878,6 +989,7 @@ def main(argv=None):
             for ref in args.refs: install_ref(s,ref,args.api,args.mc_version,args.release,args.name,"manual",args.dry_run)
         return
     if args.cmd=="batch": process_batch(args.file, targets(args)[0] if (args.server or args.server_dir or args.plugin_dir) else None, args); return
+    if args.cmd=="fetch": process_fetch(args.file,args); return
     if args.cmd=="scan":
         src=list(PROVIDERS) if args.source=="all" else [args.source]
         for s in targets(args): scan_server(s,src,args.yes,args.dry_run)

@@ -17,7 +17,8 @@ I got tired of manually managing plugins for my linux-hosted minecraft network, 
 
 It is intended for Linux-hosted *(Although platform agnostic)* Minecraft servers where the server files are accessible from the command line. It works with single-server and multi-server setups, including custom directory layouts.
 
-v1.4.0 builds on the provider system with bulk plugin discovery and downloading:
+
+`v1.4.0` builds on the provider system with bulk plugin discovery and downloading:
 
 - Search for multiple plugins from a simple list of names with `spigotdl fetch`
 - Automatically search across supported providers for the best matching project

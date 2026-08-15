@@ -17,19 +17,30 @@ I got tired of manually managing plugins for my linux-hosted minecraft network, 
 
 It is intended for Linux-hosted Minecraft servers where the server files are accessible from the command line. It works with single-server and multi-server setups, including custom directory layouts.
 
- v1.3.0 adds a provider system for:
-- Spigot resources through Spiget
-- Modrinth projects
-- Hangar projects
+v1.4.0 builds on the provider system with bulk plugin discovery and downloading:
+
+- Search for multiple plugins from a simple list of names with `spigotdl fetch`
+- Automatically search across supported providers for the best matching project
+- Prefer exact plugin name and project slug matches
+- Filter results by Minecraft version and server API/loader
+- Download directly to the current working directory or a custom `--output` directory
+- Safely handle ambiguous matches instead of blindly downloading the first search result
+- Use `--yes` for unattended bulk downloads, automatically skipping uncertain matches
+- Ignore blank lines, comments, and duplicate entries in plugin lists
+- Fall back to another provider when an exact match cannot supply a compatible version
 
 Examples:
 
 ```bash
 spigotdl survival "https://www.spigotmc.org/resources/viaversion.19254/"
-```
-```bash
+
 spigotdl search luckperms --source modrinth --api paper --mc-version 1.21.11
+
+spigotdl fetch plugins.txt
+
+spigotdl fetch plugins.txt --api paper --mc-version 1.21.11 --yes
 ```
+
 ## Features
 
 - **Multi-source plugin search**  
